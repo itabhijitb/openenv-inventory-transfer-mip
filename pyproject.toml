@@ -1,0 +1,16 @@
+[project]
+name = "inventory-transfer-env"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "openai>=1.0.0",
+    "openenv-core",
+    "ortools>=9.8",
+    "pydantic>=2.0.0",
+    "uvicorn[standard]>=0.27",
+]
+
+[project.scripts]
+server = "inventory_transfer_env.server.app:main"

@@ -1,0 +1,8 @@
+spec_version: 1
+name: inventory_transfer_env
+type: space
+runtime: fastapi
+app: app:app
+port: 7860
+action: InventoryTransferAction
+observation: InventoryTransferObservation

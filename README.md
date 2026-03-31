@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 ---
 title: Openenv Inventory Transfer Mip
 emoji: 😻

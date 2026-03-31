@@ -269,6 +269,229 @@ def _repair_action(obs, action: InventoryTransferAction) -> InventoryTransferAct
     return InventoryTransferAction(transfers=repaired)
 
 
+def _apply_action_to_state(obs, action: InventoryTransferAction):
+    wh_ids = [w.id for w in obs.warehouses]
+    products = list(obs.products)
+
+    inv = {(w.id, p): int(w.inventory.get(p, 0)) for w in obs.warehouses for p in products}
+    dem = {(w.id, p): int(w.demand.get(p, 0)) for w in obs.warehouses for p in products}
+
+    remaining_budget = float("inf") if obs.budget is None else float(obs.budget)
+    remaining_out = None if obs.outbound_capacity is None else {k: int(v) for k, v in obs.outbound_capacity.items()}
+    remaining_in = None if obs.inbound_capacity is None else {k: int(v) for k, v in obs.inbound_capacity.items()}
+
+    lane_remaining = None
+    if obs.lane_capacity is not None:
+        lane_remaining = {}
+        for i, row in obs.lane_capacity.items():
+            for j, by_p in row.items():
+                for p, cap in by_p.items():
+                    lane_remaining[(i, j, p)] = int(cap)
+
+    sku_remaining = None
+    if obs.sku_capacity is not None:
+        sku_remaining = {}
+        for w in obs.warehouses:
+            by_p = obs.sku_capacity.get(w.id, {})
+            for p, cap in by_p.items():
+                sku_remaining[(w.id, p)] = int(cap) - int(w.inventory.get(p, 0))
+
+    lots = {} if obs.min_transfer_lot is None else {p: int(v) for p, v in obs.min_transfer_lot.items()}
+    fixed_cost = {} if obs.lane_fixed_cost is None else {
+        (i, j): float(c) for i, row in obs.lane_fixed_cost.items() for j, c in row.items()
+    }
+    activated_lanes: set[tuple[str, str]] = set()
+
+    transfer_out = {w: 0 for w in wh_ids}
+    transfer_in = {w: 0 for w in wh_ids}
+
+    for t in action.transfers:
+        if t.from_warehouse == t.to_warehouse:
+            continue
+        q = int(t.quantity)
+        if q <= 0:
+            continue
+        if (t.from_warehouse, t.product) not in inv:
+            continue
+        if inv[(t.from_warehouse, t.product)] < q:
+            continue
+
+        lot = int(lots.get(t.product, 0) or 0)
+        if lot > 0 and (q % lot) != 0:
+            continue
+
+        if remaining_out is not None and transfer_out.get(t.from_warehouse, 0) + q > int(remaining_out.get(t.from_warehouse, 0)):
+            continue
+        if remaining_in is not None and transfer_in.get(t.to_warehouse, 0) + q > int(remaining_in.get(t.to_warehouse, 0)):
+            continue
+        if lane_remaining is not None and lane_remaining.get((t.from_warehouse, t.to_warehouse, t.product), 0) < q:
+            continue
+        if sku_remaining is not None and sku_remaining.get((t.to_warehouse, t.product), 0) < q:
+            continue
+
+        lane_cost = float(obs.transfer_cost[t.from_warehouse][t.to_warehouse])
+        is_new_lane = (t.from_warehouse, t.to_warehouse) not in activated_lanes
+        lane_fixed = float(fixed_cost.get((t.from_warehouse, t.to_warehouse), 0.0)) if is_new_lane else 0.0
+
+        spend = lane_fixed + lane_cost * q
+        if math.isfinite(remaining_budget) and spend > remaining_budget + 1e-9:
+            continue
+
+        remaining_budget -= spend
+        if is_new_lane and lane_fixed > 0:
+            activated_lanes.add((t.from_warehouse, t.to_warehouse))
+        if is_new_lane and lane_fixed == 0:
+            activated_lanes.add((t.from_warehouse, t.to_warehouse))
+
+        inv[(t.from_warehouse, t.product)] -= q
+        inv[(t.to_warehouse, t.product)] += q
+        transfer_out[t.from_warehouse] += q
+        transfer_in[t.to_warehouse] += q
+
+        if remaining_out is not None:
+            remaining_out[t.from_warehouse] = int(remaining_out.get(t.from_warehouse, 0) - q)
+        if remaining_in is not None:
+            remaining_in[t.to_warehouse] = int(remaining_in.get(t.to_warehouse, 0) - q)
+        if lane_remaining is not None:
+            lane_remaining[(t.from_warehouse, t.to_warehouse, t.product)] = int(
+                lane_remaining.get((t.from_warehouse, t.to_warehouse, t.product), 0) - q
+            )
+        if sku_remaining is not None:
+            sku_remaining[(t.to_warehouse, t.product)] = int(sku_remaining.get((t.to_warehouse, t.product), 0) - q)
+
+    return {
+        "wh_ids": wh_ids,
+        "products": products,
+        "inv": inv,
+        "dem": dem,
+        "remaining_budget": remaining_budget,
+        "remaining_out": remaining_out,
+        "remaining_in": remaining_in,
+        "lane_remaining": lane_remaining,
+        "sku_remaining": sku_remaining,
+        "lots": lots,
+        "fixed_cost": fixed_cost,
+        "activated_lanes": activated_lanes,
+    }
+
+
+def _polish_action(obs, base_action: InventoryTransferAction, max_iters: int = 50) -> InventoryTransferAction:
+    base_action = _repair_action(obs, base_action)
+    st = _apply_action_to_state(obs, base_action)
+
+    wh_ids = st["wh_ids"]
+    products = st["products"]
+    inv = st["inv"]
+    dem = st["dem"]
+    remaining_budget = st["remaining_budget"]
+    remaining_out = st["remaining_out"]
+    remaining_in = st["remaining_in"]
+    lane_remaining = st["lane_remaining"]
+    sku_remaining = st["sku_remaining"]
+    lots = st["lots"]
+    fixed_cost = st["fixed_cost"]
+    activated_lanes = st["activated_lanes"]
+
+    transfers = list(base_action.transfers)
+
+    for _ in range(max_iters):
+        if not math.isfinite(remaining_budget) or remaining_budget <= 1e-9:
+            break
+
+        best = None
+        for p in sorted(products):
+            deficit = {w: max(0, int(dem[(w, p)]) - int(inv[(w, p)])) for w in wh_ids}
+            surplus = {w: max(0, int(inv[(w, p)]) - int(dem[(w, p)])) for w in wh_ids}
+            if sum(deficit.values()) <= 0 or sum(surplus.values()) <= 0:
+                continue
+
+            lot = int(lots.get(p, 0) or 0)
+            step_q = lot if lot > 0 else 1
+            for i in sorted(wh_ids):
+                if surplus.get(i, 0) <= 0:
+                    continue
+                for j in sorted(wh_ids):
+                    if i == j or deficit.get(j, 0) <= 0:
+                        continue
+                    if lane_remaining is not None and lane_remaining.get((i, j, p), 0) <= 0:
+                        continue
+                    lane_cost = float(obs.transfer_cost[i][j])
+                    is_new_lane = (i, j) not in activated_lanes
+                    lane_fixed = float(fixed_cost.get((i, j), 0.0)) if is_new_lane else 0.0
+
+                    if math.isfinite(remaining_budget) and remaining_budget < lane_fixed + lane_cost * step_q - 1e-9:
+                        continue
+
+                    net = float(obs.penalty_per_unit_shortage) - lane_cost
+                    if is_new_lane and step_q > 0:
+                        net -= lane_fixed / float(step_q)
+
+                    if net <= 1e-9:
+                        continue
+                    cand = (net, p, i, j, lane_fixed)
+                    if best is None or cand > best:
+                        best = cand
+
+        if best is None:
+            break
+
+        _net, p, i, j, lane_fixed = best
+        q = min(
+            max(0, int(inv[(i, p)]) - int(dem[(i, p)])),
+            max(0, int(dem[(j, p)]) - int(inv[(j, p)])),
+        )
+
+        if remaining_out is not None:
+            q = min(q, max(0, int(remaining_out.get(i, 0))))
+        if remaining_in is not None:
+            q = min(q, max(0, int(remaining_in.get(j, 0))))
+        if lane_remaining is not None:
+            q = min(q, max(0, int(lane_remaining.get((i, j, p), 0))))
+        if sku_remaining is not None:
+            q = min(q, max(0, int(sku_remaining.get((j, p), 0))))
+
+        lot = int(lots.get(p, 0) or 0)
+        if lot > 0:
+            q = (q // lot) * lot
+
+        if q <= 0:
+            break
+
+        lane_cost = float(obs.transfer_cost[i][j])
+        spend = lane_fixed + lane_cost * q if (i, j) not in activated_lanes else lane_cost * q
+        if math.isfinite(remaining_budget) and spend > remaining_budget + 1e-9:
+            if lane_cost <= 0:
+                break
+            q = int((max(0.0, remaining_budget - (lane_fixed if (i, j) not in activated_lanes else 0.0)) // lane_cost))
+            if lot > 0:
+                q = (q // lot) * lot
+            if q <= 0:
+                break
+            spend = lane_fixed + lane_cost * q if (i, j) not in activated_lanes else lane_cost * q
+
+        if (i, j) not in activated_lanes and lane_fixed > 0:
+            remaining_budget -= lane_fixed
+            activated_lanes.add((i, j))
+        elif (i, j) not in activated_lanes:
+            activated_lanes.add((i, j))
+
+        remaining_budget -= lane_cost * q
+        inv[(i, p)] -= q
+        inv[(j, p)] += q
+        if remaining_out is not None:
+            remaining_out[i] = int(remaining_out.get(i, 0) - q)
+        if remaining_in is not None:
+            remaining_in[j] = int(remaining_in.get(j, 0) - q)
+        if lane_remaining is not None:
+            lane_remaining[(i, j, p)] = int(lane_remaining.get((i, j, p), 0) - q)
+        if sku_remaining is not None:
+            sku_remaining[(j, p)] = int(sku_remaining.get((j, p), 0) - q)
+
+        transfers.append(Transfer(from_warehouse=i, to_warehouse=j, product=p, quantity=int(q)))
+
+    return InventoryTransferAction(transfers=transfers)
+
+
 def _reset_once(base_url: str, task_id: str):
     with InventoryTransferEnv(base_url=base_url).sync() as env:
         r = env.reset(task_id=task_id)
@@ -490,6 +713,9 @@ def main() -> None:
         greedy_action = _repair_action(obs, _greedy_plan(obs))
         greedy_cost, _, greedy_ok = _simulate_total_cost(obs, greedy_action)
 
+        greedy_polished = _polish_action(obs, greedy_action, max_iters=50)
+        greedy_polished_cost, _, greedy_polished_ok = _simulate_total_cost(obs, greedy_polished)
+
         action = InventoryTransferAction(transfers=[])
         planner = "empty"
         best_cost = float("inf")
@@ -498,15 +724,27 @@ def main() -> None:
             action = greedy_action
             planner = "greedy"
             best_cost = greedy_cost
+        if greedy_polished_ok and greedy_polished_cost <= best_cost + 1e-9:
+            action = greedy_polished
+            planner = "greedy_polish"
+            best_cost = greedy_polished_cost
         if use_llm and client is not None and model_name is not None:
             try:
                 llm_action = _llm_plan(client, model_name, obs)
                 llm_action = _repair_action(obs, llm_action)
                 llm_cost, _, llm_ok = _simulate_total_cost(obs, llm_action)
+
+                llm_polished = _polish_action(obs, llm_action, max_iters=50)
+                llm_polished_cost, _, llm_polished_ok = _simulate_total_cost(obs, llm_polished)
+
                 if llm_ok and llm_cost <= best_cost + 1e-9:
                     action = llm_action
                     planner = "llm"
                     best_cost = llm_cost
+                if llm_polished_ok and llm_polished_cost <= best_cost + 1e-9:
+                    action = llm_polished
+                    planner = "llm_polish"
+                    best_cost = llm_polished_cost
             except Exception:
                 pass
 

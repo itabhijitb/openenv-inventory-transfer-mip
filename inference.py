@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from openai import OpenAI
+from ortools.linear_solver import pywraplp
 
 from inventory_transfer_env import InventoryTransferAction, InventoryTransferEnv, Transfer
 
@@ -781,6 +782,140 @@ def _llm_plan(client: OpenAI, model_name: str, obs) -> InventoryTransferAction:
     return InventoryTransferAction.model_validate(data)
 
 
+def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
+    wh_ids = [w.id for w in obs.warehouses]
+    products = list(obs.products)
+
+    inv0 = {(w.id, p): int(w.inventory.get(p, 0)) for w in obs.warehouses for p in products}
+    dem0 = {(w.id, p): int(w.demand.get(p, 0)) for w in obs.warehouses for p in products}
+
+    solver = pywraplp.Solver.CreateSolver("SCIP")
+    if solver is None:
+        return InventoryTransferAction(transfers=[])
+    solver.SetTimeLimit(int(time_limit_ms))
+
+    x: Dict[tuple[str, str, str], pywraplp.Variable] = {}
+    y: Dict[tuple[str, str], pywraplp.Variable] = {}
+    z: Dict[tuple[str, str, str], pywraplp.Variable] = {}
+
+    for i in wh_ids:
+        for j in wh_ids:
+            if i == j:
+                continue
+            y[(i, j)] = solver.IntVar(0.0, 1.0, f"y_{i}_{j}")
+            for p in products:
+                x[(i, j, p)] = solver.IntVar(0.0, solver.infinity(), f"x_{i}_{j}_{p}")
+                if obs.min_transfer_lot and int(obs.min_transfer_lot.get(p, 0) or 0) > 0:
+                    z[(i, j, p)] = solver.IntVar(0.0, 1.0, f"z_{i}_{j}_{p}")
+
+    shortage: Dict[tuple[str, str], pywraplp.Variable] = {}
+    for j in wh_ids:
+        for p in products:
+            shortage[(j, p)] = solver.NumVar(0.0, solver.infinity(), f"short_{j}_{p}")
+
+    # Inventory availability
+    for i in wh_ids:
+        for p in products:
+            solver.Add(sum(x[(i, j, p)] for j in wh_ids if j != i) <= inv0[(i, p)])
+
+    # Outbound/inbound capacities
+    if obs.outbound_capacity:
+        for i, cap in obs.outbound_capacity.items():
+            if i in wh_ids:
+                solver.Add(
+                    sum(x[(i, j, p)] for j in wh_ids for p in products if j != i) <= int(cap)
+                )
+
+    if obs.inbound_capacity:
+        for j, cap in obs.inbound_capacity.items():
+            if j in wh_ids:
+                solver.Add(
+                    sum(x[(i, j, p)] for i in wh_ids for p in products if i != j) <= int(cap)
+                )
+
+    # Shortage definition (flow balance)
+    for j in wh_ids:
+        for p in products:
+            inflow = sum(x[(i, j, p)] for i in wh_ids if i != j)
+            outflow = sum(x[(j, k, p)] for k in wh_ids if k != j)
+            solver.Add(shortage[(j, p)] >= dem0[(j, p)] - (inv0[(j, p)] + inflow - outflow))
+
+    # Lane caps
+    if obs.lane_capacity:
+        for i, row in obs.lane_capacity.items():
+            if i not in wh_ids:
+                continue
+            for j, by_p in row.items():
+                if j not in wh_ids or i == j:
+                    continue
+                for p, cap in by_p.items():
+                    if p in products:
+                        solver.Add(x[(i, j, p)] <= int(cap))
+
+    # SKU caps after transfers
+    if obs.sku_capacity:
+        for j in wh_ids:
+            by_p = obs.sku_capacity.get(j, {})
+            for p in products:
+                cap = by_p.get(p)
+                if cap is None:
+                    continue
+                inflow = sum(x[(i, j, p)] for i in wh_ids if i != j)
+                outflow = sum(x[(j, k, p)] for k in wh_ids if k != j)
+                solver.Add(inv0[(j, p)] + inflow - outflow <= int(cap))
+
+    # Min transfer lots
+    if obs.min_transfer_lot:
+        for (i, j, p), lot_z in z.items():
+            lot = int(obs.min_transfer_lot.get(p, 0) or 0)
+            if lot <= 0:
+                continue
+            solver.Add(x[(i, j, p)] >= lot * lot_z)
+            solver.Add(x[(i, j, p)] <= inv0[(i, p)] * lot_z)
+
+    # Lane activation
+    for (i, j), yvar in y.items():
+        max_out = sum(inv0[(i, p)] for p in products)
+        if max_out <= 0:
+            solver.Add(yvar == 0)
+            continue
+        solver.Add(sum(x[(i, j, p)] for p in products) <= max_out * yvar)
+
+    # Budget
+    if obs.budget is not None:
+        solver.Add(
+            sum(float(obs.transfer_cost[i][j]) * x[(i, j, p)] for (i, j, p) in x.keys())
+            + (
+                sum(float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * y[(i, j)] for (i, j) in y.keys())
+                if obs.lane_fixed_cost
+                else 0.0
+            )
+            <= float(obs.budget)
+        )
+
+    solver.Minimize(
+        sum(float(obs.transfer_cost[i][j]) * x[(i, j, p)] for (i, j, p) in x.keys())
+        + (
+            sum(float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * y[(i, j)] for (i, j) in y.keys())
+            if obs.lane_fixed_cost
+            else 0.0
+        )
+        + float(obs.penalty_per_unit_shortage) * sum(shortage[(j, p)] for j in wh_ids for p in products)
+    )
+
+    status = solver.Solve()
+    if status not in (pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE):
+        return InventoryTransferAction(transfers=[])
+
+    transfers: List[Transfer] = []
+    for (i, j, p), var in x.items():
+        q = int(round(var.solution_value()))
+        if q > 0:
+            transfers.append(Transfer(from_warehouse=i, to_warehouse=j, product=p, quantity=q))
+
+    return InventoryTransferAction(transfers=transfers)
+
+
 def _load_task_ids() -> List[str]:
     tasks_path = Path(__file__).resolve().parent / "inventory_transfer_env" / "tasks.json"
     if not tasks_path.exists():
@@ -800,6 +935,9 @@ def _health_ok(base_url: str, timeout_s: float = 5.0) -> bool:
 def main() -> None:
     base_url = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
     print_planner = os.environ.get("PRINT_PLANNER", "0") == "1"
+
+    use_mip = os.environ.get("USE_MIP", "1") == "1"
+    mip_time_limit_ms = int(os.environ.get("MIP_TIME_LIMIT_MS", "800"))
 
     # Default to LLM mode when variables are present, but fall back safely to greedy if not.
     use_llm = os.environ.get("USE_LLM", "1") == "1"
@@ -836,6 +974,18 @@ def main() -> None:
         greedy_improved = _multi_start_improve(obs, greedy_action, seeds_k=10)
         greedy_improved_cost, _, greedy_improved_ok = _simulate_total_cost(obs, greedy_improved)
 
+        mip_action = None
+        mip_cost = float("inf")
+        mip_ok = False
+        if use_mip:
+            try:
+                mip_action = _mip_plan(obs, time_limit_ms=mip_time_limit_ms)
+                mip_action = _repair_action(obs, mip_action)
+                mip_action = _multi_start_improve(obs, mip_action, seeds_k=8)
+                mip_cost, _, mip_ok = _simulate_total_cost(obs, mip_action)
+            except Exception:
+                mip_action = None
+
         action = InventoryTransferAction(transfers=[])
         planner = "empty"
         best_cost = float("inf")
@@ -848,6 +998,11 @@ def main() -> None:
             action = greedy_improved
             planner = "greedy_improve"
             best_cost = greedy_improved_cost
+
+        if mip_action is not None and mip_ok and mip_cost <= best_cost + 1e-9:
+            action = mip_action
+            planner = "mip"
+            best_cost = mip_cost
         if use_llm and client is not None and model_name is not None:
             try:
                 llm_action = _llm_plan(client, model_name, obs)

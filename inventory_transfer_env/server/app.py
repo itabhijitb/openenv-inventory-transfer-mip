@@ -12,6 +12,11 @@ app = create_app(
 )
 
 
+@app.get("/")
+def root() -> dict:
+    return {"status": "ok", "env": "inventory_transfer_env"}
+
+
 def main():
     import uvicorn
     import os

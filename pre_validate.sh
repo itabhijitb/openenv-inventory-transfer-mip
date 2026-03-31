@@ -28,15 +28,69 @@ run_with_timeout() {
   fi
 }
 
+SERVER_PID=""
+cleanup() {
+  if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill "${SERVER_PID}" || true
+    wait "${SERVER_PID}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+log "${BOLD}Starting local server for inference${NC} ..."
+PORT="${PORT:-8000}"
+HOST="${HOST:-127.0.0.1}"
+ENV_BASE_URL="http://${HOST}:${PORT}"
+cd "$REPO_DIR"
+python -m uvicorn app:app --host "$HOST" --port "$PORT" >/tmp/openenv_server.log 2>&1 &
+SERVER_PID=$!
+
+READY_OK=false
+READY_OUTPUT=$(run_with_timeout 30 python - <<PY 2>&1
+import time, urllib.request
+base = "${ENV_BASE_URL}"
+deadline = time.time() + 25
+last = None
+while time.time() < deadline:
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=2) as r:
+            if r.status == 200:
+                print("ready")
+                raise SystemExit(0)
+    except Exception as e:
+        last = e
+        time.sleep(0.5)
+print(f"not ready: {last}")
+raise SystemExit(1)
+PY
+) && READY_OK=true
+if [ "$READY_OK" != true ]; then
+  fail "server did not become ready"
+  printf "%s\n" "$READY_OUTPUT" | tail -20
+  hint "server log: /tmp/openenv_server.log"
+  stop_at "Server startup"
+fi
+
 log "${BOLD}Step 1/3: Running baseline inference${NC} ..."
-INFER_OK=false
-INFER_OUTPUT=$(cd "$REPO_DIR" && run_with_timeout "$INFER_TIMEOUT" python inference.py 2>&1) && INFER_OK=true
-if [ "$INFER_OK" = true ]; then
+INFER_LOG="/tmp/openenv_infer.log"
+rm -f "$INFER_LOG" || true
+
+set +e
+(cd "$REPO_DIR" && ENV_BASE_URL="$ENV_BASE_URL" run_with_timeout "$INFER_TIMEOUT" python inference.py 2>&1 | tee "$INFER_LOG")
+INFER_CODE=${PIPESTATUS[0]}
+set -e
+
+# Stop the server once inference is done to avoid port conflicts later.
+cleanup
+SERVER_PID=""
+
+if [ "$INFER_CODE" -eq 0 ]; then
   pass "inference.py completed"
-  printf "%s\n" "$INFER_OUTPUT" | tail -20
+  tail -20 "$INFER_LOG" || true
 else
   fail "inference.py failed or timed out (timeout=${INFER_TIMEOUT}s)"
-  printf "%s\n" "$INFER_OUTPUT" | tail -50
+  tail -50 "$INFER_LOG" || true
+  hint "server log: /tmp/openenv_server.log"
   stop_at "Step 1"
 fi
 

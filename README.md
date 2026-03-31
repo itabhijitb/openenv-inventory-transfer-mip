@@ -17,7 +17,7 @@ This repository implements a real-world supply chain optimization environment:
 
 The agent proposes a set of transfers and is scored against an OR-Tools MIP optimal solution.
 
-## Judge pitch (why this environment matters)
+## Why this environment matters
 
 **Episode structure:** Single-step episode: one transfer plan decision, scored against an optimal MIP reference.
 

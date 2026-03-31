@@ -12,5 +12,29 @@ dependencies = [
     "uvicorn[standard]>=0.27",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6.0",
+    "pyright>=1.1.380",
+]
+
 [project.scripts]
 server = "inventory_transfer_env.server.app:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv", "venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = "none"
+exclude = [".venv", "venv", "build", "dist"]

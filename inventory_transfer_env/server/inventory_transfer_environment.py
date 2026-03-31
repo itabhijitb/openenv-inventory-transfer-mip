@@ -194,6 +194,197 @@ def _solve_optimal_mip(
     return float(solver.Objective().Value()), True
 
 
+def _build_task_observation(task_id: str) -> InventoryTransferObservation:
+    if task_id == "easy":
+        products = ["P1"]
+        warehouses = [
+            Warehouse(id="W1", inventory={"P1": 120}, demand={"P1": 40}),
+            Warehouse(id="W2", inventory={"P1": 10}, demand={"P1": 60}),
+            Warehouse(id="W3", inventory={"P1": 20}, demand={"P1": 50}),
+        ]
+        transfer_cost = {
+            "W1": {"W1": 0.0, "W2": 2.0, "W3": 4.0},
+            "W2": {"W1": 2.0, "W2": 0.0, "W3": 1.5},
+            "W3": {"W1": 4.0, "W2": 1.5, "W3": 0.0},
+        }
+        lane_fixed_cost = {
+            "W1": {"W2": 30.0, "W3": 40.0},
+            "W2": {"W3": 25.0},
+        }
+        penalty = 10.0
+        budget = None
+        outbound_capacity = None
+        inbound_capacity = None
+        sku_capacity = {
+            "W1": {"P1": 150},
+            "W2": {"P1": 80},
+            "W3": {"P1": 80},
+        }
+        lane_capacity = {
+            "W1": {"W2": {"P1": 90}, "W3": {"P1": 50}},
+            "W2": {"W3": {"P1": 40}},
+        }
+        min_transfer_lot = {"P1": 5}
+    elif task_id == "medium":
+        products = ["P1", "P2", "P3"]
+        warehouses = [
+            Warehouse(id="W1", inventory={"P1": 70, "P2": 10, "P3": 40}, demand={"P1": 30, "P2": 20, "P3": 55}),
+            Warehouse(id="W2", inventory={"P1": 10, "P2": 80, "P3": 15}, demand={"P1": 45, "P2": 15, "P3": 20}),
+            Warehouse(id="W3", inventory={"P1": 55, "P2": 15, "P3": 10}, demand={"P1": 25, "P2": 45, "P3": 15}),
+            Warehouse(id="W4", inventory={"P1": 5, "P2": 45, "P3": 80}, demand={"P1": 30, "P2": 25, "P3": 35}),
+            Warehouse(id="W5", inventory={"P1": 40, "P2": 25, "P3": 10}, demand={"P1": 30, "P2": 20, "P3": 20}),
+        ]
+        base_ids = [w.id for w in warehouses]
+        transfer_cost = {
+            i: {j: (0.0 if i == j else float(abs(k - m) + 1)) for m, j in enumerate(base_ids)}
+            for k, i in enumerate(base_ids)
+        }
+        lane_fixed_cost = {
+            "W1": {"W2": 25.0, "W3": 25.0},
+            "W2": {"W4": 35.0},
+            "W3": {"W4": 30.0, "W5": 20.0},
+            "W4": {"W5": 20.0},
+        }
+        penalty = 12.0
+        budget = 220.0
+        outbound_capacity = None
+        inbound_capacity = None
+        sku_capacity = {
+            "W1": {"P1": 90, "P2": 40, "P3": 55},
+            "W2": {"P1": 60, "P2": 90, "P3": 45},
+            "W3": {"P1": 80, "P2": 70, "P3": 40},
+            "W4": {"P1": 50, "P2": 80, "P3": 90},
+            "W5": {"P1": 75, "P2": 60, "P3": 45},
+        }
+        lane_capacity = {
+            "W1": {"W2": {"P1": 25, "P2": 10, "P3": 25}, "W3": {"P1": 20, "P2": 10, "P3": 20}},
+            "W2": {"W4": {"P1": 15, "P2": 30, "P3": 15}},
+            "W3": {"W4": {"P1": 15, "P2": 15, "P3": 10}, "W5": {"P1": 10, "P2": 10, "P3": 10}},
+            "W4": {"W5": {"P1": 10, "P2": 10, "P3": 25}},
+        }
+        min_transfer_lot = {"P1": 5, "P2": 5, "P3": 10}
+    elif task_id in ("hard", "hard_v1", "hard_v2", "hard_v3"):
+        products = ["P1", "P2"]
+        warehouses = [
+            Warehouse(id="W1", inventory={"P1": 80, "P2": 10}, demand={"P1": 30, "P2": 20}),
+            Warehouse(id="W2", inventory={"P1": 15, "P2": 75}, demand={"P1": 55, "P2": 20}),
+            Warehouse(id="W3", inventory={"P1": 35, "P2": 20}, demand={"P1": 30, "P2": 40}),
+            Warehouse(id="W4", inventory={"P1": 5, "P2": 15}, demand={"P1": 45, "P2": 35}),
+            Warehouse(id="W5", inventory={"P1": 60, "P2": 45}, demand={"P1": 25, "P2": 30}),
+            Warehouse(id="W6", inventory={"P1": 25, "P2": 5}, demand={"P1": 35, "P2": 25}),
+            Warehouse(id="W7", inventory={"P1": 10, "P2": 60}, demand={"P1": 25, "P2": 35}),
+            Warehouse(id="W8", inventory={"P1": 55, "P2": 30}, demand={"P1": 30, "P2": 25}),
+        ]
+        wh_ids = [w.id for w in warehouses]
+        if task_id == "hard_v2":
+            transfer_cost = {
+                i: {j: (0.0 if i == j else float(((a * 3 + b) % 9) + 1)) for b, j in enumerate(wh_ids)}
+                for a, i in enumerate(wh_ids)
+            }
+        elif task_id == "hard_v3":
+            transfer_cost = {
+                i: {j: (0.0 if i == j else float(((a + 2 * b) % 8) + 1)) for b, j in enumerate(wh_ids)}
+                for a, i in enumerate(wh_ids)
+            }
+        else:
+            transfer_cost = {
+                i: {j: (0.0 if i == j else float(((a + b) % 7) + 1)) for b, j in enumerate(wh_ids)}
+                for a, i in enumerate(wh_ids)
+            }
+
+        lane_fixed_cost = {
+            "W1": {"W2": 55.0, "W3": 50.0},
+            "W2": {"W4": 60.0, "W5": 40.0},
+            "W3": {"W4": 45.0, "W6": 45.0},
+            "W5": {"W7": 35.0, "W8": 35.0},
+            "W8": {"W4": 50.0},
+        }
+        penalty = 15.0
+        if task_id == "hard_v1":
+            budget = 240.0
+        elif task_id == "hard_v3":
+            budget = 280.0
+        else:
+            budget = 260.0
+        outbound_capacity = {w: 60 for w in wh_ids}
+        inbound_capacity = {w: 60 for w in wh_ids}
+        sku_capacity = {w: {"P1": 85, "P2": 85} for w in wh_ids}
+        lane_capacity = {
+            "W1": {"W2": {"P1": 20, "P2": 10}, "W3": {"P1": 25, "P2": 10}},
+            "W2": {"W4": {"P1": 15, "P2": 25}, "W5": {"P1": 10, "P2": 20}},
+            "W3": {"W4": {"P1": 15, "P2": 15}, "W6": {"P1": 20, "P2": 10}},
+            "W5": {"W7": {"P1": 10, "P2": 20}, "W8": {"P1": 15, "P2": 15}},
+            "W8": {"W4": {"P1": 15, "P2": 15}},
+        }
+        min_transfer_lot = {"P1": 10, "P2": 10}
+    else:
+        raise ValueError(f"Unknown task_id '{task_id}'")
+
+    return InventoryTransferObservation(
+        task_id=task_id,
+        warehouses=warehouses,
+        products=products,
+        transfer_cost=transfer_cost,
+        lane_fixed_cost=lane_fixed_cost,
+        penalty_per_unit_shortage=penalty,
+        budget=budget,
+        outbound_capacity=outbound_capacity,
+        inbound_capacity=inbound_capacity,
+        sku_capacity=sku_capacity,
+        lane_capacity=lane_capacity,
+        min_transfer_lot=min_transfer_lot,
+    )
+
+
+def _build_inv_dem(
+    warehouses: List[Warehouse], products: List[str]
+) -> Tuple[Dict[Tuple[str, str], int], Dict[Tuple[str, str], int]]:
+    inv: Dict[Tuple[str, str], int] = {}
+    dem: Dict[Tuple[str, str], int] = {}
+    for w in warehouses:
+        for p in products:
+            inv[(w.id, p)] = int(w.inventory.get(p, 0))
+            dem[(w.id, p)] = int(w.demand.get(p, 0))
+    return inv, dem
+
+
+def _attach_optimal_reference(obs: InventoryTransferObservation, problem: InventoryTransferObservation) -> None:
+    try:
+        optimal_cost, ok = _solve_optimal_mip(
+            warehouses=problem.warehouses,
+            products=problem.products,
+            transfer_cost=problem.transfer_cost,
+            lane_fixed_cost=problem.lane_fixed_cost,
+            penalty_per_unit_shortage=problem.penalty_per_unit_shortage,
+            budget=problem.budget,
+            outbound_capacity=problem.outbound_capacity,
+            inbound_capacity=problem.inbound_capacity,
+            sku_capacity=problem.sku_capacity,
+            lane_capacity=problem.lane_capacity,
+            min_transfer_lot=problem.min_transfer_lot,
+        )
+        obs.optimal_cost = optimal_cost
+        obs.optimal_feasible = ok
+    except Exception as e:
+        obs.optimal_cost = None
+        obs.optimal_feasible = None
+        obs.metadata = {**(obs.metadata or {}), "optimal_cost_error": str(e)}
+
+
+def _finalize_grading_fields(obs: InventoryTransferObservation) -> None:
+    obs.disqualified = not obs.is_feasible
+    obs.dq_reasons = list(obs.violations) if obs.disqualified else []
+    if obs.optimal_cost is not None and obs.optimal_cost > 0 and obs.optimal_cost != float("inf"):
+        obs.optimality_ratio = float(obs.optimal_cost) / max(float(obs.total_cost), float(obs.optimal_cost))
+        obs.cost_gap = float(obs.total_cost) - float(obs.optimal_cost)
+        if obs.disqualified:
+            obs.score = 0.0
+        else:
+            obs.score = max(0.0, min(1.0, obs.optimality_ratio))
+    else:
+        obs.score = 0.0
+
+
 class InventoryTransferEnvironment(Environment):
     def __init__(self):
         self._state = InventoryTransferState(episode_id=str(uuid.uuid4()), step_count=0)
@@ -206,142 +397,7 @@ class InventoryTransferEnvironment(Environment):
             task_id=task_id,
         )
 
-        if task_id == "easy":
-            products = ["P1"]
-            warehouses = [
-                Warehouse(id="W1", inventory={"P1": 120}, demand={"P1": 40}),
-                Warehouse(id="W2", inventory={"P1": 10}, demand={"P1": 60}),
-                Warehouse(id="W3", inventory={"P1": 20}, demand={"P1": 50}),
-            ]
-            transfer_cost = {
-                "W1": {"W1": 0.0, "W2": 2.0, "W3": 4.0},
-                "W2": {"W1": 2.0, "W2": 0.0, "W3": 1.5},
-                "W3": {"W1": 4.0, "W2": 1.5, "W3": 0.0},
-            }
-            lane_fixed_cost = {
-                "W1": {"W2": 30.0, "W3": 40.0},
-                "W2": {"W3": 25.0},
-            }
-            penalty = 10.0
-            budget = None
-            outbound_capacity = None
-            inbound_capacity = None
-            sku_capacity = {
-                "W1": {"P1": 150},
-                "W2": {"P1": 80},
-                "W3": {"P1": 80},
-            }
-            lane_capacity = {
-                "W1": {"W2": {"P1": 90}, "W3": {"P1": 50}},
-                "W2": {"W3": {"P1": 40}},
-            }
-            min_transfer_lot = {"P1": 5}
-        elif task_id == "medium":
-            products = ["P1", "P2", "P3"]
-            warehouses = [
-                Warehouse(id="W1", inventory={"P1": 70, "P2": 10, "P3": 40}, demand={"P1": 30, "P2": 20, "P3": 55}),
-                Warehouse(id="W2", inventory={"P1": 10, "P2": 80, "P3": 15}, demand={"P1": 45, "P2": 15, "P3": 20}),
-                Warehouse(id="W3", inventory={"P1": 55, "P2": 15, "P3": 10}, demand={"P1": 25, "P2": 45, "P3": 15}),
-                Warehouse(id="W4", inventory={"P1": 5, "P2": 45, "P3": 80}, demand={"P1": 30, "P2": 25, "P3": 35}),
-                Warehouse(id="W5", inventory={"P1": 40, "P2": 25, "P3": 10}, demand={"P1": 30, "P2": 20, "P3": 20}),
-            ]
-            base_ids = [w.id for w in warehouses]
-            transfer_cost = {i: {j: (0.0 if i == j else float(abs(k - m) + 1)) for m, j in enumerate(base_ids)} for k, i in enumerate(base_ids)}
-            lane_fixed_cost = {
-                "W1": {"W2": 25.0, "W3": 25.0},
-                "W2": {"W4": 35.0},
-                "W3": {"W4": 30.0, "W5": 20.0},
-                "W4": {"W5": 20.0},
-            }
-            penalty = 12.0
-            budget = 220.0
-            outbound_capacity = None
-            inbound_capacity = None
-            sku_capacity = {
-                "W1": {"P1": 90, "P2": 40, "P3": 55},
-                "W2": {"P1": 60, "P2": 90, "P3": 45},
-                "W3": {"P1": 80, "P2": 70, "P3": 40},
-                "W4": {"P1": 50, "P2": 80, "P3": 90},
-                "W5": {"P1": 75, "P2": 60, "P3": 45},
-            }
-            lane_capacity = {
-                "W1": {"W2": {"P1": 25, "P2": 10, "P3": 25}, "W3": {"P1": 20, "P2": 10, "P3": 20}},
-                "W2": {"W4": {"P1": 15, "P2": 30, "P3": 15}},
-                "W3": {"W4": {"P1": 15, "P2": 15, "P3": 10}, "W5": {"P1": 10, "P2": 10, "P3": 10}},
-                "W4": {"W5": {"P1": 10, "P2": 10, "P3": 25}},
-            }
-            min_transfer_lot = {"P1": 5, "P2": 5, "P3": 10}
-        elif task_id in ("hard", "hard_v1", "hard_v2", "hard_v3"):
-            products = ["P1", "P2"]
-            warehouses = [
-                Warehouse(id="W1", inventory={"P1": 80, "P2": 10}, demand={"P1": 30, "P2": 20}),
-                Warehouse(id="W2", inventory={"P1": 15, "P2": 75}, demand={"P1": 55, "P2": 20}),
-                Warehouse(id="W3", inventory={"P1": 35, "P2": 20}, demand={"P1": 30, "P2": 40}),
-                Warehouse(id="W4", inventory={"P1": 5, "P2": 15}, demand={"P1": 45, "P2": 35}),
-                Warehouse(id="W5", inventory={"P1": 60, "P2": 45}, demand={"P1": 25, "P2": 30}),
-                Warehouse(id="W6", inventory={"P1": 25, "P2": 5}, demand={"P1": 35, "P2": 25}),
-                Warehouse(id="W7", inventory={"P1": 10, "P2": 60}, demand={"P1": 25, "P2": 35}),
-                Warehouse(id="W8", inventory={"P1": 55, "P2": 30}, demand={"P1": 30, "P2": 25}),
-            ]
-            wh_ids = [w.id for w in warehouses]
-            if task_id == "hard_v2":
-                transfer_cost = {
-                    i: {j: (0.0 if i == j else float(((a * 3 + b) % 9) + 1)) for b, j in enumerate(wh_ids)}
-                    for a, i in enumerate(wh_ids)
-                }
-            elif task_id == "hard_v3":
-                transfer_cost = {
-                    i: {j: (0.0 if i == j else float(((a + 2 * b) % 8) + 1)) for b, j in enumerate(wh_ids)}
-                    for a, i in enumerate(wh_ids)
-                }
-            else:
-                transfer_cost = {
-                    i: {j: (0.0 if i == j else float(((a + b) % 7) + 1)) for b, j in enumerate(wh_ids)}
-                    for a, i in enumerate(wh_ids)
-                }
-
-            lane_fixed_cost = {
-                "W1": {"W2": 55.0, "W3": 50.0},
-                "W2": {"W4": 60.0, "W5": 40.0},
-                "W3": {"W4": 45.0, "W6": 45.0},
-                "W5": {"W7": 35.0, "W8": 35.0},
-                "W8": {"W4": 50.0},
-            }
-            penalty = 15.0
-            if task_id == "hard_v1":
-                budget = 240.0
-            elif task_id == "hard_v3":
-                budget = 280.0
-            else:
-                budget = 260.0
-            outbound_capacity = {w: 60 for w in wh_ids}
-            inbound_capacity = {w: 60 for w in wh_ids}
-            sku_capacity = {w: {"P1": 85, "P2": 85} for w in wh_ids}
-            lane_capacity = {
-                "W1": {"W2": {"P1": 20, "P2": 10}, "W3": {"P1": 25, "P2": 10}},
-                "W2": {"W4": {"P1": 15, "P2": 25}, "W5": {"P1": 10, "P2": 20}},
-                "W3": {"W4": {"P1": 15, "P2": 15}, "W6": {"P1": 20, "P2": 10}},
-                "W5": {"W7": {"P1": 10, "P2": 20}, "W8": {"P1": 15, "P2": 15}},
-                "W8": {"W4": {"P1": 15, "P2": 15}},
-            }
-            min_transfer_lot = {"P1": 10, "P2": 10}
-        else:
-            raise ValueError(f"Unknown task_id '{task_id}'")
-
-        obs = InventoryTransferObservation(
-            task_id=task_id,
-            warehouses=warehouses,
-            products=products,
-            transfer_cost=transfer_cost,
-            lane_fixed_cost=lane_fixed_cost,
-            penalty_per_unit_shortage=penalty,
-            budget=budget,
-            outbound_capacity=outbound_capacity,
-            inbound_capacity=inbound_capacity,
-            sku_capacity=sku_capacity,
-            lane_capacity=lane_capacity,
-            min_transfer_lot=min_transfer_lot,
-        )
+        obs = _build_task_observation(task_id)
         self._problem = deepcopy(obs)
         return obs
 
@@ -358,12 +414,7 @@ class InventoryTransferEnvironment(Environment):
         wh_ids = [w.id for w in obs.warehouses]
         products = list(obs.products)
 
-        inv: Dict[Tuple[str, str], int] = {}
-        dem: Dict[Tuple[str, str], int] = {}
-        for w in obs.warehouses:
-            for p in products:
-                inv[(w.id, p)] = int(w.inventory.get(p, 0))
-                dem[(w.id, p)] = int(w.demand.get(p, 0))
+        inv, dem = _build_inv_dem(obs.warehouses, products)
 
         transfer_out: Dict[str, int] = {w: 0 for w in wh_ids}
         transfer_in: Dict[str, int] = {w: 0 for w in wh_ids}
@@ -517,40 +568,8 @@ class InventoryTransferEnvironment(Environment):
         obs.reward = reward
         obs.done = True
 
-        # Attach grader reference values (optimal cost)
-        try:
-            optimal_cost, ok = _solve_optimal_mip(
-                warehouses=self._problem.warehouses,
-                products=self._problem.products,
-                transfer_cost=self._problem.transfer_cost,
-                lane_fixed_cost=self._problem.lane_fixed_cost,
-                penalty_per_unit_shortage=self._problem.penalty_per_unit_shortage,
-                budget=self._problem.budget,
-                outbound_capacity=self._problem.outbound_capacity,
-                inbound_capacity=self._problem.inbound_capacity,
-                sku_capacity=self._problem.sku_capacity,
-                lane_capacity=self._problem.lane_capacity,
-                min_transfer_lot=self._problem.min_transfer_lot,
-            )
-            obs.optimal_cost = optimal_cost
-            obs.optimal_feasible = ok
-        except Exception as e:
-            obs.optimal_cost = None
-            obs.optimal_feasible = None
-            obs.metadata = {**(obs.metadata or {}), "optimal_cost_error": str(e)}
-
-        # Round-1 style grading
-        obs.disqualified = not obs.is_feasible
-        obs.dq_reasons = dq_reasons
-        if obs.optimal_cost is not None and obs.optimal_cost > 0 and obs.optimal_cost != float("inf"):
-            obs.optimality_ratio = float(obs.optimal_cost) / max(float(obs.total_cost), float(obs.optimal_cost))
-            obs.cost_gap = float(obs.total_cost) - float(obs.optimal_cost)
-            if obs.disqualified:
-                obs.score = 0.0
-            else:
-                obs.score = max(0.0, min(1.0, obs.optimality_ratio))
-        else:
-            obs.score = 0.0
+        _attach_optimal_reference(obs, self._problem)
+        _finalize_grading_fields(obs)
 
         return obs
 

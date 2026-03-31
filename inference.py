@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import os
 import math
+import json
+import re
+import urllib.request
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 from openai import OpenAI
@@ -162,31 +166,99 @@ def _score_from_obs(obs) -> float:
     return max(0.0, min(1.0, optimal_cost / max(obs.total_cost, optimal_cost)))
 
 
+def _llm_plan(client: OpenAI, model_name: str, obs) -> InventoryTransferAction:
+    prompt = {
+        "task": "inventory_transfer_planning",
+        "instruction": (
+            "Return a JSON object with a single key 'transfers' containing a list of transfers. "
+            "Each transfer must have keys: from_warehouse, to_warehouse, product, quantity (non-negative int). "
+            "Respect all constraints exposed in the observation (budget, caps, min lots, etc.). "
+            "If no transfers are needed, return an empty list."
+        ),
+        "observation": obs.model_dump(),
+        "output_schema": {
+            "transfers": [
+                {
+                    "from_warehouse": "str",
+                    "to_warehouse": "str",
+                    "product": "str",
+                    "quantity": "int"
+                }
+            ]
+        },
+    }
+
+    resp = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": "You are a supply chain optimization agent."},
+            {"role": "user", "content": json.dumps(prompt)},
+        ],
+        temperature=0,
+    )
+    content = resp.choices[0].message.content or "{}"
+    # Be tolerant to models wrapping JSON in text/code fences.
+    m = re.search(r"\{.*\}", content, flags=re.DOTALL)
+    data = json.loads(m.group(0) if m else content)
+    return InventoryTransferAction.model_validate(data)
+
+
+def _load_task_ids() -> List[str]:
+    tasks_path = Path(__file__).resolve().parent / "inventory_transfer_env" / "tasks.json"
+    if not tasks_path.exists():
+        return ["easy", "medium", "hard", "hard_v1", "hard_v2", "hard_v3", "edge_case"]
+    return list(json.loads(tasks_path.read_text()).keys())
+
+
+def _health_ok(base_url: str, timeout_s: float = 5.0) -> bool:
+    url = base_url.rstrip("/") + "/health"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            return 200 <= int(resp.status) < 300
+    except Exception:
+        return False
+
+
 def main() -> None:
     base_url = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
 
-    use_llm = os.environ.get("USE_LLM", "0") == "1"
+    # Default to LLM mode when variables are present, but fall back safely to greedy if not.
+    use_llm = os.environ.get("USE_LLM", "1") == "1"
     api_base_url = os.environ.get("API_BASE_URL")
     model_name = os.environ.get("MODEL_NAME")
     hf_token = os.environ.get("HF_TOKEN")
 
-    if use_llm:
-        if not api_base_url or not model_name or not hf_token:
-            raise RuntimeError(
-                "USE_LLM=1 requires API_BASE_URL, MODEL_NAME, HF_TOKEN environment variables"
-            )
+    client = None
+    if use_llm and api_base_url and model_name and hf_token:
         client = OpenAI(base_url=api_base_url, api_key=hf_token)
-        _ = client
+    else:
+        use_llm = False
 
-    tasks = ["easy", "medium", "hard", "hard_v1", "hard_v2", "hard_v3", "edge_case"]
+    tasks = _load_task_ids()
+
+    if not _health_ok(base_url):
+        raise RuntimeError(
+            f"Server health check failed at {base_url.rstrip('/')}/health. "
+            "Start the server (e.g., `python -m uvicorn app:app --host 127.0.0.1 --port 8000`) "
+            "or set ENV_BASE_URL to a running deployment."
+        )
 
     results = []
     for task_id in tasks:
         # Some servers close WebSocket sessions after an episode.
         # Reconnect per task to be robust in automated evaluation.
         with InventoryTransferEnv(base_url=base_url).sync() as env:
-            r = env.reset(task_id=task_id)
+            try:
+                r = env.reset(task_id=task_id)
+            except Exception as e:
+                print(f"skip {task_id}: reset failed: {e}")
+                continue
             action = _greedy_plan(r.observation)
+            if use_llm and client is not None and model_name is not None:
+                try:
+                    action = _llm_plan(client, model_name, r.observation)
+                except Exception:
+                    action = _greedy_plan(r.observation)
             step = env.step(action)
             score = _score_from_obs(step.observation)
             results.append((task_id, score, step.observation.total_cost, step.observation))
@@ -199,6 +271,9 @@ def main() -> None:
             f"opt_cost={obs.optimal_cost} ratio={obs.optimality_ratio} gap={obs.cost_gap} "
             f"fill_rate={obs.fill_rate:.4f} dq_reasons={dq_reasons}"
         )
+
+    if not results:
+        raise RuntimeError("No tasks were successfully evaluated.")
 
     avg = sum(s for _, s, _, _ in results) / len(results)
     print(f"avg_score={avg:.4f}")

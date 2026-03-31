@@ -28,7 +28,7 @@ def main() -> None:
     if not _http_get_ok(health_url, timeout_s=args.timeout_s):
         raise SystemExit(f"FAIL: {health_url} did not return 200")
 
-    tasks = ["easy", "medium", "hard", "hard_v1", "hard_v2", "hard_v3"]
+    tasks = ["easy", "medium", "hard", "hard_v1", "hard_v2", "hard_v3", "edge_case"]
 
     null_scores_run1 = {}
     null_scores_run2 = {}

@@ -178,7 +178,7 @@ def main() -> None:
         client = OpenAI(base_url=api_base_url, api_key=hf_token)
         _ = client
 
-    tasks = ["easy", "medium", "hard", "hard_v1", "hard_v2", "hard_v3"]
+    tasks = ["easy", "medium", "hard", "hard_v1", "hard_v2", "hard_v3", "edge_case"]
 
     results = []
     for task_id in tasks:

@@ -93,6 +93,188 @@
       }
     ]
   },
+  "edge_case": {
+    "budget": 140.0,
+    "cost_gap": null,
+    "disqualified": false,
+    "done": false,
+    "dq_reasons": [],
+    "fill_rate": 0.0,
+    "fulfilled_units": 0,
+    "inbound_capacity": {
+      "W1": 60,
+      "W2": 60,
+      "W3": 40,
+      "W4": 30
+    },
+    "is_feasible": true,
+    "lane_activation_cost_total": 0.0,
+    "lane_capacity": {
+      "W1": {
+        "W2": {
+          "P1": 30,
+          "P2": 10
+        },
+        "W3": {
+          "P1": 25,
+          "P2": 25
+        }
+      },
+      "W2": {
+        "W1": {
+          "P1": 10,
+          "P2": 30
+        },
+        "W3": {
+          "P1": 25,
+          "P2": 25
+        }
+      },
+      "W3": {
+        "W4": {
+          "P1": 15,
+          "P2": 15
+        }
+      },
+      "W4": {
+        "W3": {
+          "P1": 15,
+          "P2": 15
+        }
+      }
+    },
+    "lane_fixed_cost": {
+      "W1": {
+        "W2": 70.0,
+        "W3": 5.0
+      },
+      "W2": {
+        "W1": 70.0,
+        "W3": 5.0
+      },
+      "W3": {
+        "W4": 50.0
+      }
+    },
+    "metadata": {},
+    "min_transfer_lot": {
+      "P1": 10,
+      "P2": 10
+    },
+    "optimal_cost": null,
+    "optimal_feasible": null,
+    "optimality_ratio": null,
+    "outbound_capacity": {
+      "W1": 60,
+      "W2": 60,
+      "W3": 40,
+      "W4": 30
+    },
+    "penalty_per_unit_shortage": 18.0,
+    "products": [
+      "P1",
+      "P2"
+    ],
+    "reward": null,
+    "score": null,
+    "shortage_penalty_total": 0.0,
+    "shortage_units_total": 0,
+    "sku_capacity": {
+      "W1": {
+        "P1": 95,
+        "P2": 45
+      },
+      "W2": {
+        "P1": 45,
+        "P2": 95
+      },
+      "W3": {
+        "P1": 55,
+        "P2": 55
+      },
+      "W4": {
+        "P1": 40,
+        "P2": 40
+      }
+    },
+    "task_id": "edge_case",
+    "total_cost": 0.0,
+    "total_demand_units": 0,
+    "transfer_cost": {
+      "W1": {
+        "W1": 0.0,
+        "W2": 1.0,
+        "W3": 2.0,
+        "W4": 3.0
+      },
+      "W2": {
+        "W1": 1.0,
+        "W2": 0.0,
+        "W3": 2.5,
+        "W4": 2.0
+      },
+      "W3": {
+        "W1": 2.0,
+        "W2": 2.5,
+        "W3": 0.0,
+        "W4": 1.5
+      },
+      "W4": {
+        "W1": 3.0,
+        "W2": 2.0,
+        "W3": 1.5,
+        "W4": 0.0
+      }
+    },
+    "transfer_cost_total": 0.0,
+    "violations": [],
+    "warehouses": [
+      {
+        "demand": {
+          "P1": 10,
+          "P2": 40
+        },
+        "id": "W1",
+        "inventory": {
+          "P1": 90,
+          "P2": 0
+        }
+      },
+      {
+        "demand": {
+          "P1": 40,
+          "P2": 10
+        },
+        "id": "W2",
+        "inventory": {
+          "P1": 0,
+          "P2": 90
+        }
+      },
+      {
+        "demand": {
+          "P1": 40,
+          "P2": 40
+        },
+        "id": "W3",
+        "inventory": {
+          "P1": 20,
+          "P2": 20
+        }
+      },
+      {
+        "demand": {
+          "P1": 20,
+          "P2": 20
+        },
+        "id": "W4",
+        "inventory": {
+          "P1": 10,
+          "P2": 10
+        }
+      }
+    ]
+  },
   "hard": {
     "budget": 260.0,
     "inbound_capacity": {

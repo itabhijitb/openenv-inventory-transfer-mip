@@ -25,6 +25,17 @@ This environment models a practical SCM lever (lateral transshipment / inventory
 
 **Difficulty progression:** `easy` -> `medium` -> `hard` -> `hard_v1`/`hard_v2`/`hard_v3` add scale and tighter operational constraints, including lane fixed activation costs.
 
+### Hard task variants: what each one is testing
+
+| Task | What changes vs. baseline hard | What it tests |
+| --- | --- | --- |
+| `hard` | Baseline 8-warehouse, 2-SKU instance with budgets + inbound/outbound caps + lane caps + SKU caps + min lots + lane fixed activation costs | General planning under coupled constraints + fixed-charge lane selection |
+| `hard_v1` | Tighter budget | Budget-constrained planning and prioritization |
+| `hard_v2` | Different transfer-cost matrix pattern | Robustness to cost-structure changes; avoids overfitting to one lane topology |
+| `hard_v3` | Higher budget but different transfer-cost matrix pattern | Tradeoff shift: more options become feasible; tests whether policies exploit expanded feasible set |
+
+An additional adversarial stress-test task is included as `edge_case`.
+
 **Constraints + KPIs (consolidated):** budget, per-warehouse inbound/outbound capacity, per-lane capacity, per-warehouse per-SKU storage capacity, per-product minimum transfer lots; KPI fields include `total_cost`, `fill_rate` (service level), `optimal_cost`, `score` in `[0,1]`, and disqualification reporting (`disqualified`, `dq_reasons`).
 
 ## Run locally
@@ -49,6 +60,13 @@ Run lint + typecheck:
 ruff check .
 pyright
 ```
+
+## Versioning
+
+- Code is versioned using SemVer-like tags (major/minor/patch).
+- Task instances are defined in `inventory_transfer_env/tasks.json` and are treated as part of the public benchmark surface.
+- Backward-compatible changes (docs, tooling, refactors) should not change task data or scoring.
+- If task definitions or grading semantics change, bump the minor/major version and document it.
 
 2. Start server
 

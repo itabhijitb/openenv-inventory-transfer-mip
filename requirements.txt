@@ -1,6 +1,6 @@
-fastapi>=0.110
-openai>=1.0.0
-openenv-core
-ortools>=9.8
-pydantic>=2.0.0
-uvicorn[standard]>=0.27
+fastapi==0.135.2
+openai==2.30.0
+openenv-core==0.2.3
+ortools==9.15.6755
+pydantic==2.11.7
+uvicorn[standard]==0.42.0

@@ -16,6 +16,7 @@ dependencies = [
 dev = [
     "ruff>=0.6.0",
     "pyright>=1.1.380",
+    "pytest>=8.0.0",
 ]
 
 [project.scripts]
@@ -38,3 +39,6 @@ pythonVersion = "3.10"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = "none"
 exclude = [".venv", "venv", "build", "dist"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

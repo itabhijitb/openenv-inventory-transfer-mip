@@ -147,6 +147,241 @@ def _greedy_plan(obs) -> InventoryTransferAction:
     return InventoryTransferAction(transfers=transfers)
 
 
+def _repair_action(obs, action: InventoryTransferAction) -> InventoryTransferAction:
+    wh_ids = [w.id for w in obs.warehouses]
+    products = list(obs.products)
+
+    inv = {(w.id, p): int(w.inventory.get(p, 0)) for w in obs.warehouses for p in products}
+
+    remaining_budget = float("inf") if obs.budget is None else float(obs.budget)
+    remaining_out = None if obs.outbound_capacity is None else {k: int(v) for k, v in obs.outbound_capacity.items()}
+    remaining_in = None if obs.inbound_capacity is None else {k: int(v) for k, v in obs.inbound_capacity.items()}
+
+    lane_remaining = None
+    if obs.lane_capacity is not None:
+        lane_remaining = {}
+        for i, row in obs.lane_capacity.items():
+            for j, by_p in row.items():
+                for p, cap in by_p.items():
+                    lane_remaining[(i, j, p)] = int(cap)
+
+    sku_remaining = None
+    if obs.sku_capacity is not None:
+        sku_remaining = {}
+        for w in obs.warehouses:
+            by_p = obs.sku_capacity.get(w.id, {})
+            for p, cap in by_p.items():
+                sku_remaining[(w.id, p)] = int(cap) - int(w.inventory.get(p, 0))
+
+    lots = {} if obs.min_transfer_lot is None else {p: int(v) for p, v in obs.min_transfer_lot.items()}
+    fixed_cost = {} if obs.lane_fixed_cost is None else {
+        (i, j): float(c) for i, row in obs.lane_fixed_cost.items() for j, c in row.items()
+    }
+    activated_lanes: set[tuple[str, str]] = set()
+
+    repaired: List[Transfer] = []
+    for t in action.transfers:
+        if t.from_warehouse not in wh_ids or t.to_warehouse not in wh_ids:
+            continue
+        if t.product not in products:
+            continue
+        if t.from_warehouse == t.to_warehouse:
+            continue
+
+        q = int(t.quantity)
+        if q <= 0:
+            continue
+
+        q = min(q, inv[(t.from_warehouse, t.product)])
+        if remaining_out is not None:
+            q = min(q, max(0, remaining_out.get(t.from_warehouse, 0)))
+        if remaining_in is not None:
+            q = min(q, max(0, remaining_in.get(t.to_warehouse, 0)))
+        if lane_remaining is not None:
+            q = min(q, max(0, lane_remaining.get((t.from_warehouse, t.to_warehouse, t.product), 0)))
+        if sku_remaining is not None:
+            q = min(q, max(0, sku_remaining.get((t.to_warehouse, t.product), 0)))
+
+        lot = int(lots.get(t.product, 0) or 0)
+        if lot > 0:
+            q = (q // lot) * lot
+
+        if q <= 0:
+            continue
+
+        lane_cost = float(obs.transfer_cost[t.from_warehouse][t.to_warehouse])
+        is_new_lane = (t.from_warehouse, t.to_warehouse) not in activated_lanes
+        lane_fixed = float(fixed_cost.get((t.from_warehouse, t.to_warehouse), 0.0)) if is_new_lane else 0.0
+
+        # Ensure we can afford fixed activation + variable cost.
+        if math.isfinite(remaining_budget):
+            if lane_fixed > 0 and remaining_budget <= lane_fixed + 1e-9:
+                continue
+
+            avail_for_variable = remaining_budget - lane_fixed
+            if avail_for_variable < 0:
+                continue
+
+            if lane_cost > 0:
+                q = min(q, int(avail_for_variable // lane_cost))
+            if lot > 0:
+                q = (q // lot) * lot
+            if q <= 0:
+                continue
+
+            # Final safety: total spend must fit (after lot rounding).
+            if lane_fixed + lane_cost * q > remaining_budget + 1e-9:
+                if lane_cost <= 0:
+                    continue
+                q = int((avail_for_variable // lane_cost) // max(1, lot) * max(1, lot)) if lot > 0 else int(avail_for_variable // lane_cost)
+                if q <= 0:
+                    continue
+
+        # Apply spend
+        if is_new_lane and lane_fixed > 0:
+            remaining_budget -= lane_fixed
+            activated_lanes.add((t.from_warehouse, t.to_warehouse))
+        remaining_budget -= lane_cost * q
+
+        inv[(t.from_warehouse, t.product)] -= q
+        inv[(t.to_warehouse, t.product)] += q
+
+        if remaining_out is not None:
+            remaining_out[t.from_warehouse] = int(remaining_out.get(t.from_warehouse, 0) - q)
+        if remaining_in is not None:
+            remaining_in[t.to_warehouse] = int(remaining_in.get(t.to_warehouse, 0) - q)
+        if lane_remaining is not None:
+            lane_remaining[(t.from_warehouse, t.to_warehouse, t.product)] = int(
+                lane_remaining.get((t.from_warehouse, t.to_warehouse, t.product), 0) - q
+            )
+        if sku_remaining is not None:
+            sku_remaining[(t.to_warehouse, t.product)] = int(sku_remaining.get((t.to_warehouse, t.product), 0) - q)
+
+        repaired.append(
+            Transfer(
+                from_warehouse=t.from_warehouse,
+                to_warehouse=t.to_warehouse,
+                product=t.product,
+                quantity=int(q),
+            )
+        )
+
+    return InventoryTransferAction(transfers=repaired)
+
+
+def _reset_once(base_url: str, task_id: str):
+    with InventoryTransferEnv(base_url=base_url).sync() as env:
+        r = env.reset(task_id=task_id)
+        return r.observation
+
+
+def _step_once(base_url: str, task_id: str, action: InventoryTransferAction):
+    # Use a fresh connection for the step to avoid WS idle timeouts while the LLM is thinking.
+    with InventoryTransferEnv(base_url=base_url).sync() as env:
+        _ = env.reset(task_id=task_id)
+        return env.step(action)
+
+
+def _simulate_total_cost(obs, action: InventoryTransferAction) -> tuple[float, float, bool]:
+    wh_ids = [w.id for w in obs.warehouses]
+    products = list(obs.products)
+    inv = {(w.id, p): int(w.inventory.get(p, 0)) for w in obs.warehouses for p in products}
+    dem = {(w.id, p): int(w.demand.get(p, 0)) for w in obs.warehouses for p in products}
+
+    transfer_out = {w: 0 for w in wh_ids}
+    transfer_in = {w: 0 for w in wh_ids}
+
+    lane_used: Dict[tuple[str, str, str], int] = {}
+    transfer_cost_total = 0.0
+    violations: List[str] = []
+
+    lots = {} if obs.min_transfer_lot is None else {p: int(v) for p, v in obs.min_transfer_lot.items()}
+
+    for t in action.transfers:
+        if t.from_warehouse == t.to_warehouse:
+            continue
+        q = int(t.quantity)
+        if q < 0:
+            violations.append("negative quantity")
+            continue
+        if t.from_warehouse not in wh_ids or t.to_warehouse not in wh_ids:
+            violations.append("unknown warehouse")
+            continue
+        if t.product not in products:
+            violations.append("unknown product")
+            continue
+
+        lot = int(lots.get(t.product, 0) or 0)
+        if lot > 0 and q > 0 and (q % lot) != 0:
+            violations.append("min transfer lot violation")
+            continue
+
+        if inv[(t.from_warehouse, t.product)] < q:
+            violations.append("insufficient inventory")
+            continue
+
+        transfer_cost_total += float(obs.transfer_cost[t.from_warehouse][t.to_warehouse]) * q
+        inv[(t.from_warehouse, t.product)] -= q
+        inv[(t.to_warehouse, t.product)] += q
+        transfer_out[t.from_warehouse] += q
+        transfer_in[t.to_warehouse] += q
+        lane_used[(t.from_warehouse, t.to_warehouse, t.product)] = lane_used.get(
+            (t.from_warehouse, t.to_warehouse, t.product), 0
+        ) + q
+
+    lane_activation_cost_total = 0.0
+    if obs.lane_fixed_cost:
+        activated = {(i, j) for (i, j, _p), used in lane_used.items() if used > 0}
+        for (i, j) in activated:
+            lane_activation_cost_total += float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0))
+
+    # Constraints
+    if obs.outbound_capacity:
+        for w, cap in obs.outbound_capacity.items():
+            if transfer_out.get(w, 0) > int(cap):
+                violations.append("outbound cap exceeded")
+
+    if obs.inbound_capacity:
+        for w, cap in obs.inbound_capacity.items():
+            if transfer_in.get(w, 0) > int(cap):
+                violations.append("inbound cap exceeded")
+
+    if obs.lane_capacity:
+        for (i, j, p), used in lane_used.items():
+            cap = obs.lane_capacity.get(i, {}).get(j, {}).get(p)
+            if cap is not None and used > int(cap):
+                violations.append("lane cap exceeded")
+
+    if obs.sku_capacity:
+        for w in wh_ids:
+            by_p = obs.sku_capacity.get(w, {})
+            for p in products:
+                cap = by_p.get(p)
+                if cap is not None and inv[(w, p)] > int(cap):
+                    violations.append("sku cap exceeded")
+
+    total_transfer_related = transfer_cost_total + lane_activation_cost_total
+    if obs.budget is not None and total_transfer_related > float(obs.budget) + 1e-9:
+        violations.append("budget exceeded")
+
+    shortage_units_total = 0
+    total_demand_units = 0
+    for w in wh_ids:
+        for p in products:
+            total_demand_units += int(dem[(w, p)])
+            shortage_units_total += int(max(0, dem[(w, p)] - inv[(w, p)]))
+
+    shortage_penalty_total = float(shortage_units_total) * float(obs.penalty_per_unit_shortage)
+    total_cost = transfer_cost_total + lane_activation_cost_total + shortage_penalty_total
+
+    fill_rate = 1.0
+    if total_demand_units > 0:
+        fill_rate = float((total_demand_units - shortage_units_total) / total_demand_units)
+
+    ok = len(violations) == 0
+    return float(total_cost), float(fill_rate), ok
+
+
 def _score_from_obs(obs) -> float:
     if obs.score is not None:
         return float(obs.score)
@@ -221,6 +456,7 @@ def _health_ok(base_url: str, timeout_s: float = 5.0) -> bool:
 
 def main() -> None:
     base_url = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
+    print_planner = os.environ.get("PRINT_PLANNER", "0") == "1"
 
     # Default to LLM mode when variables are present, but fall back safely to greedy if not.
     use_llm = os.environ.get("USE_LLM", "1") == "1"
@@ -245,23 +481,41 @@ def main() -> None:
 
     results = []
     for task_id in tasks:
-        # Some servers close WebSocket sessions after an episode.
-        # Reconnect per task to be robust in automated evaluation.
-        with InventoryTransferEnv(base_url=base_url).sync() as env:
+        try:
+            obs = _reset_once(base_url, task_id)
+        except Exception as e:
+            print(f"skip {task_id}: reset failed: {e}")
+            continue
+
+        greedy_action = _repair_action(obs, _greedy_plan(obs))
+        greedy_cost, _, greedy_ok = _simulate_total_cost(obs, greedy_action)
+
+        action = InventoryTransferAction(transfers=[])
+        planner = "empty"
+        best_cost = float("inf")
+
+        if greedy_ok:
+            action = greedy_action
+            planner = "greedy"
+            best_cost = greedy_cost
+        if use_llm and client is not None and model_name is not None:
             try:
-                r = env.reset(task_id=task_id)
-            except Exception as e:
-                print(f"skip {task_id}: reset failed: {e}")
-                continue
-            action = _greedy_plan(r.observation)
-            if use_llm and client is not None and model_name is not None:
-                try:
-                    action = _llm_plan(client, model_name, r.observation)
-                except Exception:
-                    action = _greedy_plan(r.observation)
-            step = env.step(action)
-            score = _score_from_obs(step.observation)
-            results.append((task_id, score, step.observation.total_cost, step.observation))
+                llm_action = _llm_plan(client, model_name, obs)
+                llm_action = _repair_action(obs, llm_action)
+                llm_cost, _, llm_ok = _simulate_total_cost(obs, llm_action)
+                if llm_ok and llm_cost <= best_cost + 1e-9:
+                    action = llm_action
+                    planner = "llm"
+                    best_cost = llm_cost
+            except Exception:
+                pass
+
+        if print_planner:
+            print(f"planner[{task_id}]={planner}")
+
+        step = _step_once(base_url, task_id, action)
+        score = _score_from_obs(step.observation)
+        results.append((task_id, score, step.observation.total_cost, step.observation))
 
     for task_id, score, cost, obs in results:
         dq = "DQ" if obs.disqualified else "OK"

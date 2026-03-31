@@ -35,6 +35,21 @@ This environment models a practical SCM lever (lateral transshipment / inventory
 pip install -e .
 ```
 
+## Development (code quality)
+
+Install dev tools:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Run lint + typecheck:
+
+```bash
+ruff check .
+pyright
+```
+
 2. Start server
 
 ```bash

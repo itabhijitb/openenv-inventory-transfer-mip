@@ -4,6 +4,7 @@ import os
 import math
 import json
 import re
+import time
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -580,16 +581,48 @@ def _polish_action(obs, base_action: InventoryTransferAction, max_iters: int = 5
 
 
 def _reset_once(base_url: str, task_id: str):
-    with InventoryTransferEnv(base_url=base_url).sync() as env:
-        r = env.reset(task_id=task_id)
-        return r.observation
+    last: Exception | None = None
+    for attempt in range(6):
+        try:
+            with InventoryTransferEnv(base_url=base_url).sync() as env:
+                r = env.reset(task_id=task_id)
+                return r.observation
+        except Exception as e:
+            last = e
+            msg = str(e)
+            retryable = (
+                "CAPACITY_REACHED" in msg
+                or "Server at capacity" in msg
+                or "received 1000" in msg
+                or "ConnectionClosed" in msg
+            )
+            if not retryable or attempt >= 5:
+                raise
+            time.sleep(0.5 * (2**attempt))
+    raise last  # type: ignore[misc]
 
 
 def _step_once(base_url: str, task_id: str, action: InventoryTransferAction):
     # Use a fresh connection for the step to avoid WS idle timeouts while the LLM is thinking.
-    with InventoryTransferEnv(base_url=base_url).sync() as env:
-        _ = env.reset(task_id=task_id)
-        return env.step(action)
+    last: Exception | None = None
+    for attempt in range(6):
+        try:
+            with InventoryTransferEnv(base_url=base_url).sync() as env:
+                _ = env.reset(task_id=task_id)
+                return env.step(action)
+        except Exception as e:
+            last = e
+            msg = str(e)
+            retryable = (
+                "CAPACITY_REACHED" in msg
+                or "Server at capacity" in msg
+                or "received 1000" in msg
+                or "ConnectionClosed" in msg
+            )
+            if not retryable or attempt >= 5:
+                raise
+            time.sleep(0.5 * (2**attempt))
+    raise last  # type: ignore[misc]
 
 
 def _simulate_total_cost(obs, action: InventoryTransferAction) -> tuple[float, float, bool]:

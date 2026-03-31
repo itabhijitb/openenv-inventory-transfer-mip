@@ -17,6 +17,16 @@ This repository implements a real-world supply chain optimization environment:
 
 The agent proposes a set of transfers and is scored against an OR-Tools MIP optimal solution.
 
+## Judge pitch (why this environment matters)
+
+**Episode structure:** Single-step episode: one transfer plan decision, scored against an optimal MIP reference.
+
+This environment models a practical SCM lever (lateral transshipment / inventory balancing) with realistic operational constraints. It is useful for evaluating planning agents because decisions are coupled across a network (lane selection, capacity bottlenecks, and fixed lane activation tradeoffs), and the grader provides a deterministic, reproducible signal grounded in an OR-Tools MIP optimum.
+
+**Difficulty progression:** `easy` -> `medium` -> `hard` -> `hard_v1`/`hard_v2`/`hard_v3` add scale and tighter operational constraints, including lane fixed activation costs.
+
+**Constraints + KPIs (consolidated):** budget, per-warehouse inbound/outbound capacity, per-lane capacity, per-warehouse per-SKU storage capacity, per-product minimum transfer lots; KPI fields include `total_cost`, `fill_rate` (service level), `optimal_cost`, `score` in `[0,1]`, and disqualification reporting (`disqualified`, `dq_reasons`).
+
 ## Run locally
 
 1. Install

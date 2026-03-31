@@ -44,6 +44,9 @@ class InventoryTransferObservation(Observation):
     shortage_penalty_total: float = 0.0
     total_cost: float = 0.0
 
+    lanes_activated: int = 0
+    co2_kg: float = 0.0
+
     total_demand_units: int = 0
     fulfilled_units: int = 0
     fill_rate: float = 0.0

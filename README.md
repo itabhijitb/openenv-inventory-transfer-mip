@@ -23,6 +23,12 @@ The agent proposes a set of transfers and is scored against an OR-Tools MIP opti
 
 This environment models a practical SCM lever (lateral transshipment / inventory balancing) with realistic operational constraints. It is useful for evaluating planning agents because decisions are coupled across a network (lane selection, capacity bottlenecks, and fixed lane activation tradeoffs), and the grader provides a deterministic, reproducible signal grounded in an OR-Tools MIP optimum.
 
+### Real-world analogs (how this maps to practice)
+
+- **Retail / e-commerce DC networks:** rebalance fast-moving SKUs across fulfillment centers to protect service levels.
+- **Spare parts logistics:** reposition parts inventory across depots while respecting throughput and storage constraints.
+- **Budgeted expedites:** decide when it is worth opening a lane (fixed activation cost) vs. accepting shortage penalty.
+
 **Difficulty progression:** `easy` -> `medium` -> `hard` -> `hard_v1`/`hard_v2`/`hard_v3` add scale and tighter operational constraints, including lane fixed activation costs.
 
 ### Hard task variants: what each one is testing
@@ -36,7 +42,7 @@ This environment models a practical SCM lever (lateral transshipment / inventory
 
 An additional adversarial stress-test task is included as `edge_case`.
 
-**Constraints + KPIs (consolidated):** budget, per-warehouse inbound/outbound capacity, per-lane capacity, per-warehouse per-SKU storage capacity, per-product minimum transfer lots; KPI fields include `total_cost`, `fill_rate` (service level), `optimal_cost`, `score` in `[0,1]`, and disqualification reporting (`disqualified`, `dq_reasons`).
+**Constraints + KPIs (consolidated):** budget, per-warehouse inbound/outbound capacity, per-lane capacity, per-warehouse per-SKU storage capacity, per-product minimum transfer lots; KPI fields include `total_cost`, `fill_rate` (service level), `lanes_activated` (operational complexity), `co2_kg` (deterministic emissions proxy), `optimal_cost`, `score` in `[0,1]`, and disqualification reporting (`disqualified`, `dq_reasons`).
 
 ## Run locally
 

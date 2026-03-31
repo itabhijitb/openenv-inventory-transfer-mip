@@ -436,6 +436,17 @@ class InventoryTransferEnvironment(Environment):
         obs.shortage_penalty_total = float(shortage_penalty_total)
         obs.total_cost = float(total_cost)
 
+        activated_lanes = {(i, j) for (i, j, _p), used in lane_used.items() if used > 0}
+        obs.lanes_activated = int(len(activated_lanes))
+        # Deterministic CO2 proxy: proportional to lane "distance" proxy (transfer cost) and shipped units.
+        # This is reported as a KPI only and is not used in scoring.
+        co2_proxy = 0.0
+        for (i, j, p), used in lane_used.items():
+            if used <= 0:
+                continue
+            co2_proxy += float(obs.transfer_cost[i][j]) * float(used)
+        obs.co2_kg = float(co2_proxy)
+
         obs.total_demand_units = int(total_demand_units)
         obs.fulfilled_units = int(fulfilled_units)
         obs.fill_rate = float(fill_rate)

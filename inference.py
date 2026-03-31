@@ -147,6 +147,93 @@ def _greedy_plan(obs) -> InventoryTransferAction:
     return InventoryTransferAction(transfers=transfers)
 
 
+def _candidate_lane_seeds(obs, top_k: int = 10) -> List[InventoryTransferAction]:
+    wh_ids = [w.id for w in obs.warehouses]
+    products = list(obs.products)
+    inv0 = {(w.id, p): int(w.inventory.get(p, 0)) for w in obs.warehouses for p in products}
+    dem0 = {(w.id, p): int(w.demand.get(p, 0)) for w in obs.warehouses for p in products}
+
+    fixed_cost = {} if obs.lane_fixed_cost is None else {
+        (i, j): float(c) for i, row in obs.lane_fixed_cost.items() for j, c in row.items()
+    }
+    lots = {} if obs.min_transfer_lot is None else {p: int(v) for p, v in obs.min_transfer_lot.items()}
+
+    scored: List[tuple[float, str, str, str]] = []
+    for p in sorted(products):
+        lot = int(lots.get(p, 0) or 0)
+        q0 = lot if lot > 0 else 1
+        for i in sorted(wh_ids):
+            s = max(0, int(inv0[(i, p)]) - int(dem0[(i, p)]))
+            if s <= 0:
+                continue
+            for j in sorted(wh_ids):
+                if i == j:
+                    continue
+                d = max(0, int(dem0[(j, p)]) - int(inv0[(j, p)]))
+                if d <= 0:
+                    continue
+                if obs.lane_capacity is not None and obs.lane_capacity.get(i, {}).get(j, {}).get(p) is not None:
+                    if int(obs.lane_capacity[i][j][p]) <= 0:
+                        continue
+                ship = float(obs.transfer_cost[i][j])
+                fixed = float(fixed_cost.get((i, j), 0.0))
+                # Net benefit per unit (using penalty as marginal value of meeting demand).
+                net = float(obs.penalty_per_unit_shortage) - ship
+                # Approximate fixed activation amortized over a min-lot-sized shipment.
+                if q0 > 0:
+                    net -= fixed / float(q0)
+                if net <= 1e-9:
+                    continue
+                scored.append((net, p, i, j))
+
+    scored.sort(reverse=True)
+    seeds: List[InventoryTransferAction] = []
+    for net, p, i, j in scored[:top_k]:
+        _ = net
+        lot = int(lots.get(p, 0) or 0)
+        q = lot if lot > 0 else 1
+        seeds.append(
+            InventoryTransferAction(
+                transfers=[Transfer(from_warehouse=i, to_warehouse=j, product=p, quantity=int(q))]
+            )
+        )
+    return seeds
+
+
+def _multi_start_improve(obs, base_action: InventoryTransferAction, *, seeds_k: int = 10) -> InventoryTransferAction:
+    # Only do multi-start when it likely matters (fixed-charge / larger instances).
+    if len(obs.warehouses) < 6 and not obs.lane_fixed_cost:
+        return _polish_action(obs, base_action, max_iters=50)
+
+    candidate_seeds = _candidate_lane_seeds(obs, top_k=seeds_k)
+
+    actions: List[InventoryTransferAction] = []
+    actions.append(base_action)
+    actions.extend(candidate_seeds)
+
+    # Add pairwise seeds for stronger exploration (bounded).
+    for a in candidate_seeds[: min(6, len(candidate_seeds))]:
+        for b in candidate_seeds[: min(6, len(candidate_seeds))]:
+            if a is b:
+                continue
+            actions.append(InventoryTransferAction(transfers=list(a.transfers) + list(b.transfers)))
+
+    best_action = InventoryTransferAction(transfers=[])
+    best_cost = float("inf")
+
+    for act in actions:
+        repaired = _repair_action(obs, act)
+        polished = _polish_action(obs, repaired, max_iters=60)
+        cost, _fr, ok = _simulate_total_cost(obs, polished)
+        if ok and cost < best_cost - 1e-9:
+            best_cost = cost
+            best_action = polished
+
+    if best_cost == float("inf"):
+        return _repair_action(obs, base_action)
+    return best_action
+
+
 def _repair_action(obs, action: InventoryTransferAction) -> InventoryTransferAction:
     wh_ids = [w.id for w in obs.warehouses]
     products = list(obs.products)
@@ -713,8 +800,8 @@ def main() -> None:
         greedy_action = _repair_action(obs, _greedy_plan(obs))
         greedy_cost, _, greedy_ok = _simulate_total_cost(obs, greedy_action)
 
-        greedy_polished = _polish_action(obs, greedy_action, max_iters=50)
-        greedy_polished_cost, _, greedy_polished_ok = _simulate_total_cost(obs, greedy_polished)
+        greedy_improved = _multi_start_improve(obs, greedy_action, seeds_k=10)
+        greedy_improved_cost, _, greedy_improved_ok = _simulate_total_cost(obs, greedy_improved)
 
         action = InventoryTransferAction(transfers=[])
         planner = "empty"
@@ -724,27 +811,27 @@ def main() -> None:
             action = greedy_action
             planner = "greedy"
             best_cost = greedy_cost
-        if greedy_polished_ok and greedy_polished_cost <= best_cost + 1e-9:
-            action = greedy_polished
-            planner = "greedy_polish"
-            best_cost = greedy_polished_cost
+        if greedy_improved_ok and greedy_improved_cost <= best_cost + 1e-9:
+            action = greedy_improved
+            planner = "greedy_improve"
+            best_cost = greedy_improved_cost
         if use_llm and client is not None and model_name is not None:
             try:
                 llm_action = _llm_plan(client, model_name, obs)
                 llm_action = _repair_action(obs, llm_action)
                 llm_cost, _, llm_ok = _simulate_total_cost(obs, llm_action)
 
-                llm_polished = _polish_action(obs, llm_action, max_iters=50)
-                llm_polished_cost, _, llm_polished_ok = _simulate_total_cost(obs, llm_polished)
+                llm_improved = _multi_start_improve(obs, llm_action, seeds_k=10)
+                llm_improved_cost, _, llm_improved_ok = _simulate_total_cost(obs, llm_improved)
 
                 if llm_ok and llm_cost <= best_cost + 1e-9:
                     action = llm_action
                     planner = "llm"
                     best_cost = llm_cost
-                if llm_polished_ok and llm_polished_cost <= best_cost + 1e-9:
-                    action = llm_polished
-                    planner = "llm_polish"
-                    best_cost = llm_polished_cost
+                if llm_improved_ok and llm_improved_cost <= best_cost + 1e-9:
+                    action = llm_improved
+                    planner = "llm_improve"
+                    best_cost = llm_improved_cost
             except Exception:
                 pass
 

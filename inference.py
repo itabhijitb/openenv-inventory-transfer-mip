@@ -626,6 +626,45 @@ def _step_once(base_url: str, task_id: str, action: InventoryTransferAction):
     raise last  # type: ignore[misc]
 
 
+def _run_multi_step_episode(base_url: str, task_id: str, mip_time_limit_ms: int):
+    """Run a multi-step episode using a single WebSocket connection.
+
+    Each step re-solves the MIP on the current observation (receding-horizon),
+    which sees the updated inventory state returned by the previous step.
+    """
+    last: Exception | None = None
+    for attempt in range(6):
+        try:
+            with InventoryTransferEnv(base_url=base_url).sync() as env:
+                reset_result = env.reset(task_id=task_id)
+                current_obs = reset_result.observation
+                max_steps = getattr(current_obs, "max_steps", 1)
+
+                step_result = None
+                for _s in range(max_steps):
+                    step_action = _mip_plan(current_obs, time_limit_ms=mip_time_limit_ms)
+                    _, _, raw_ok = _simulate_total_cost(current_obs, step_action)
+                    if not raw_ok or not step_action.transfers:
+                        step_action = _greedy_plan(current_obs)
+                    step_result = env.step(step_action)
+                    if not step_result.done:
+                        current_obs = step_result.observation
+                return step_result
+        except Exception as e:
+            last = e
+            msg = str(e)
+            retryable = (
+                "CAPACITY_REACHED" in msg
+                or "Server at capacity" in msg
+                or "received 1000" in msg
+                or "ConnectionClosed" in msg
+            )
+            if not retryable or attempt >= 5:
+                raise
+            time.sleep(0.5 * (2**attempt))
+    raise last  # type: ignore[misc]
+
+
 def _simulate_total_cost(obs, action: InventoryTransferAction) -> tuple[float, float, bool]:
     wh_ids = [w.id for w in obs.warehouses]
     products = list(obs.products)
@@ -1056,7 +1095,12 @@ def main() -> None:
         if print_planner:
             print(f"planner[{task_id}]={planner}")
 
-        step = _step_once(base_url, task_id, action)
+        max_steps = getattr(obs, "max_steps", 1)
+        if max_steps > 1:
+            # Multi-step episode: keep WS connection open, re-solve MIP each step
+            step = _run_multi_step_episode(base_url, task_id, mip_time_limit_ms)
+        else:
+            step = _step_once(base_url, task_id, action)
         score = _score_from_obs(step.observation)
         results.append((task_id, score, step.observation.total_cost, step.observation))
 

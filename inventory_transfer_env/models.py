@@ -38,6 +38,14 @@ class InventoryTransferObservation(Observation):
     lane_capacity: Optional[Dict[str, Dict[str, Dict[str, int]]]] = None
     min_transfer_lot: Optional[Dict[str, int]] = None
 
+    # Multi-step episode fields
+    max_steps: int = Field(default=1, description="Total steps allowed per episode")
+    step_number: int = Field(default=0, description="Current step (1-indexed after first step)")
+    per_step_budget: Optional[float] = Field(
+        default=None,
+        description="Per-step transfer budget (resets each step; overrides episode budget when set)",
+    )
+
     transfer_cost_total: float = 0.0
     lane_activation_cost_total: float = 0.0
     shortage_units_total: int = 0
@@ -65,3 +73,7 @@ class InventoryTransferObservation(Observation):
 
 class InventoryTransferState(State):
     task_id: str = ""
+    current_inventory: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    cumulative_transfer_cost: float = 0.0
+    cumulative_lane_activation_cost: float = 0.0
+    steps_remaining: int = 1

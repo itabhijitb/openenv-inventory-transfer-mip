@@ -57,7 +57,6 @@ def _solve_optimal_mip(
         raise RuntimeError("OR-Tools SCIP solver is not available")
 
     x: Dict[Tuple[str, str, str], pywraplp.Variable] = {}
-    z_lot: Dict[Tuple[str, str, str], pywraplp.Variable] = {}
     y_lane: Dict[Tuple[str, str], pywraplp.Variable] = {}
     for i in wh_ids:
         for j in wh_ids:
@@ -66,8 +65,6 @@ def _solve_optimal_mip(
             y_lane[(i, j)] = solver.IntVar(0.0, 1.0, f"y_{i}_{j}")
             for p in products:
                 x[(i, j, p)] = solver.IntVar(0.0, solver.infinity(), f"x_{i}_{j}_{p}")
-                if min_transfer_lot and int(min_transfer_lot.get(p, 0)) > 0:
-                    z_lot[(i, j, p)] = solver.IntVar(0.0, 1.0, f"z_{i}_{j}_{p}")
 
     shortage: Dict[Tuple[str, str], pywraplp.Variable] = {}
     for j in wh_ids:
@@ -159,14 +156,19 @@ def _solve_optimal_mip(
                 outflow = sum(x[(j, k, p)] for k in wh_ids if k != j)
                 solver.Add(inv[(j, p)] + inflow - outflow <= int(cap))
 
-    # Min transfer lot: either 0 or >= lot size
+    # Min transfer lot: enforce x is an exact multiple of lot via x = lot * k
     if min_transfer_lot:
-        for (i, j, p), lot_z in z_lot.items():
-            lot = int(min_transfer_lot.get(p, 0))
-            if lot <= 0:
-                continue
-            solver.Add(x[(i, j, p)] >= lot * lot_z)
-            solver.Add(x[(i, j, p)] <= inv[(i, p)] * lot_z)
+        for i in wh_ids:
+            for j in wh_ids:
+                if i == j:
+                    continue
+                for p in products:
+                    lot = int(min_transfer_lot.get(p, 0))
+                    if lot <= 0:
+                        continue
+                    max_k = inv[(i, p)] // lot
+                    k = solver.IntVar(0, max_k, f"k_{i}_{j}_{p}")
+                    solver.Add(x[(i, j, p)] == lot * k)
 
     # Lane activation: if any product moves on (i,j), y_lane[i,j] must be 1
     for (i, j) in y_lane.keys():
@@ -271,14 +273,19 @@ class InventoryTransferEnvironment(Environment):
         self._problem: Optional[InventoryTransferObservation] = None
 
     def reset(self, task_id: str = "easy", **kwargs) -> Observation:
+        obs = _build_task_observation(task_id)
+        self._problem = deepcopy(obs)
         self._state = InventoryTransferState(
             episode_id=str(uuid.uuid4()),
             step_count=0,
             task_id=task_id,
+            current_inventory={w.id: dict(w.inventory) for w in obs.warehouses},
+            cumulative_transfer_cost=0.0,
+            cumulative_lane_activation_cost=0.0,
+            steps_remaining=obs.max_steps,
         )
-
-        obs = _build_task_observation(task_id)
-        self._problem = deepcopy(obs)
+        obs.step_number = 0
+        obs.done = False
         return obs
 
     def step(self, action: Action, **kwargs) -> Observation:
@@ -289,12 +296,19 @@ class InventoryTransferEnvironment(Environment):
             raise ValueError(f"Expected InventoryTransferAction, got {type(action)}")
 
         self._state.step_count += 1
+        self._state.steps_remaining -= 1
 
         obs = deepcopy(self._problem)
         wh_ids = [w.id for w in obs.warehouses]
         products = list(obs.products)
 
-        inv, dem = _build_inv_dem(obs.warehouses, products)
+        # Use live inventory from state (carries across steps); demand is fixed from problem.
+        inv: Dict[Tuple[str, str], int] = {}
+        dem: Dict[Tuple[str, str], int] = {}
+        for w in obs.warehouses:
+            for p in products:
+                inv[(w.id, p)] = int(self._state.current_inventory.get(w.id, {}).get(p, 0))
+                dem[(w.id, p)] = int(w.demand.get(p, 0))
 
         transfer_out: Dict[str, int] = {w: 0 for w in wh_ids}
         transfer_in: Dict[str, int] = {w: 0 for w in wh_ids}
@@ -354,11 +368,7 @@ class InventoryTransferEnvironment(Environment):
 
         if obs.lane_capacity:
             for (i, j, p), used in lane_used.items():
-                cap = (
-                    obs.lane_capacity.get(i, {})
-                    .get(j, {})
-                    .get(p)
-                )
+                cap = obs.lane_capacity.get(i, {}).get(j, {}).get(p)
                 if cap is not None and used > int(cap):
                     violations.append(
                         f"lane capacity exceeded for {i}->{j}/{p}: {used} > {int(cap)}"
@@ -378,7 +388,7 @@ class InventoryTransferEnvironment(Environment):
                         )
                         is_feasible = False
 
-        # Lane fixed activation costs (count each (i,j) once if any flow)
+        # Lane fixed activation costs (count each (i,j) once per step if any flow)
         if obs.lane_fixed_cost:
             activated = {(i, j) for (i, j, _p), used in lane_used.items() if used > 0}
             for (i, j) in activated:
@@ -397,70 +407,93 @@ class InventoryTransferEnvironment(Environment):
                     is_feasible = False
 
         total_transfer_related = transfer_cost_total + lane_activation_cost_total
-        if obs.budget is not None and total_transfer_related > obs.budget + 1e-9:
-            violations.append(
-                f"budget exceeded: {total_transfer_related:.3f} > {obs.budget:.3f}"
-            )
-            is_feasible = False
 
-        shortage_units_total = 0
-        for w in wh_ids:
-            for p in products:
-                shortage = max(0, dem[(w, p)] - inv[(w, p)])
-                shortage_units_total += int(shortage)
-
-        shortage_penalty_total = shortage_units_total * obs.penalty_per_unit_shortage
-        total_cost = transfer_cost_total + lane_activation_cost_total + shortage_penalty_total
-
-        total_demand_units = 0
-        for w in wh_ids:
-            for p in products:
-                total_demand_units += int(dem[(w, p)])
-        fulfilled_units = int(total_demand_units) - int(shortage_units_total)
-        fill_rate = float(fulfilled_units / total_demand_units) if total_demand_units > 0 else 1.0
-
-        updated_warehouses: List[Warehouse] = []
-        for w in obs.warehouses:
-            updated_warehouses.append(
-                Warehouse(
-                    id=w.id,
-                    inventory={p: int(inv[(w.id, p)]) for p in products},
-                    demand=w.demand,
+        # Per-step budget resets each step; episode budget is cumulative.
+        if obs.per_step_budget is not None:
+            if total_transfer_related > obs.per_step_budget + 1e-9:
+                violations.append(
+                    f"per-step budget exceeded: {total_transfer_related:.3f} > {obs.per_step_budget:.3f}"
                 )
+                is_feasible = False
+        elif obs.budget is not None:
+            cumulative_spend = (
+                self._state.cumulative_transfer_cost
+                + self._state.cumulative_lane_activation_cost
+                + total_transfer_related
             )
+            if cumulative_spend > obs.budget + 1e-9:
+                violations.append(
+                    f"episode budget exceeded: {cumulative_spend:.3f} > {obs.budget:.3f}"
+                )
+                is_feasible = False
 
+        # Update live inventory state (applied even if infeasible, matching single-step behaviour)
+        for wid in wh_ids:
+            for p in products:
+                self._state.current_inventory[wid][p] = int(inv[(wid, p)])
+        self._state.cumulative_transfer_cost += transfer_cost_total
+        self._state.cumulative_lane_activation_cost += lane_activation_cost_total
+
+        is_final = (self._state.steps_remaining <= 0)
+
+        updated_warehouses: List[Warehouse] = [
+            Warehouse(
+                id=w.id,
+                inventory={p: int(inv[(w.id, p)]) for p in products},
+                demand=w.demand,
+            )
+            for w in obs.warehouses
+        ]
         obs.warehouses = updated_warehouses
         obs.transfer_cost_total = float(transfer_cost_total)
         obs.lane_activation_cost_total = float(lane_activation_cost_total)
-        obs.shortage_units_total = int(shortage_units_total)
-        obs.shortage_penalty_total = float(shortage_penalty_total)
-        obs.total_cost = float(total_cost)
 
         activated_lanes = {(i, j) for (i, j, _p), used in lane_used.items() if used > 0}
         obs.lanes_activated = int(len(activated_lanes))
-        # Deterministic CO2 proxy: proportional to lane "distance" proxy (transfer cost) and shipped units.
-        # This is reported as a KPI only and is not used in scoring.
-        co2_proxy = 0.0
-        for (i, j, p), used in lane_used.items():
-            if used <= 0:
-                continue
-            co2_proxy += float(obs.transfer_cost[i][j]) * float(used)
-        obs.co2_kg = float(co2_proxy)
-
-        obs.total_demand_units = int(total_demand_units)
-        obs.fulfilled_units = int(fulfilled_units)
-        obs.fill_rate = float(fill_rate)
+        obs.co2_kg = float(sum(
+            float(obs.transfer_cost[i][j]) * float(used)
+            for (i, j, _p), used in lane_used.items() if used > 0
+        ))
         obs.is_feasible = bool(is_feasible)
         obs.violations = violations
+        obs.step_number = self._state.step_count
 
-        dq_reasons: List[str] = list(violations) if not is_feasible else []
+        if is_final:
+            shortage_units_total = sum(
+                max(0, int(dem[(w, p)]) - int(inv[(w, p)])) for w in wh_ids for p in products
+            )
+            shortage_penalty_total = shortage_units_total * obs.penalty_per_unit_shortage
+            total_demand_units = sum(int(dem[(w, p)]) for w in wh_ids for p in products)
+            fulfilled_units = total_demand_units - shortage_units_total
+            fill_rate = float(fulfilled_units / total_demand_units) if total_demand_units > 0 else 1.0
 
-        reward = -float(total_cost) if is_feasible else -float(total_cost) - 1e6
-        obs.reward = reward
-        obs.done = True
+            cumulative_cost = (
+                self._state.cumulative_transfer_cost
+                + self._state.cumulative_lane_activation_cost
+                + shortage_penalty_total
+            )
+            obs.shortage_units_total = int(shortage_units_total)
+            obs.shortage_penalty_total = float(shortage_penalty_total)
+            obs.total_cost = float(cumulative_cost)
+            obs.total_demand_units = int(total_demand_units)
+            obs.fulfilled_units = int(fulfilled_units)
+            obs.fill_rate = float(fill_rate)
+            obs.reward = -float(cumulative_cost) if is_feasible else -float(cumulative_cost) - 1e6
+            obs.done = True
 
-        _attach_optimal_reference(obs, self._problem)
-        _finalize_grading_fields(obs)
+            _attach_optimal_reference(obs, self._problem)
+            _finalize_grading_fields(obs)
+        else:
+            # Intermediate step: useful per-step reward signal; shortage assessed at end.
+            total_demand_units = sum(int(dem[(w, p)]) for w in wh_ids for p in products)
+            obs.shortage_units_total = 0
+            obs.shortage_penalty_total = 0.0
+            obs.total_cost = float(total_transfer_related)
+            obs.total_demand_units = int(total_demand_units)
+            obs.fulfilled_units = 0
+            obs.fill_rate = 0.0
+            obs.reward = -float(total_transfer_related) if is_feasible else -float(total_transfer_related) - 1e6
+            obs.done = False
 
         return obs
 

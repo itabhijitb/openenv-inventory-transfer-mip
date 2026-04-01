@@ -952,6 +952,14 @@ def main() -> None:
     else:
         use_llm = False
 
+    if force_llm and not use_llm:
+        missing = [
+            k
+            for k, v in (("API_BASE_URL", api_base_url), ("MODEL_NAME", model_name), ("HF_TOKEN", hf_token))
+            if not v
+        ]
+        print(f"FORCE_LLM=1 but LLM is disabled (missing env vars: {', '.join(missing)})")
+
     tasks = _load_task_ids()
 
     if not _health_ok(base_url):

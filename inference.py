@@ -942,6 +942,7 @@ def main() -> None:
     # Default to LLM mode when variables are present, but fall back safely to greedy if not.
     use_llm = os.environ.get("USE_LLM", "1") == "1"
     force_llm = os.environ.get("FORCE_LLM", "0") == "1"
+    print_llm_errors = os.environ.get("PRINT_LLM_ERRORS", "0") == "1"
     api_base_url = os.environ.get("API_BASE_URL")
     model_name = os.environ.get("MODEL_NAME")
     hf_token = os.environ.get("HF_TOKEN")
@@ -1042,8 +1043,9 @@ def main() -> None:
                         action = llm_improved
                         planner = "llm_improve"
                         best_cost = llm_improved_cost
-            except Exception:
-                pass
+            except Exception as e:
+                if print_llm_errors:
+                    print(f"llm_error[{task_id}]={type(e).__name__}: {e}")
 
         if print_planner:
             print(f"planner[{task_id}]={planner}")

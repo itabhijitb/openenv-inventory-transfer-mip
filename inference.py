@@ -941,6 +941,7 @@ def main() -> None:
 
     # Default to LLM mode when variables are present, but fall back safely to greedy if not.
     use_llm = os.environ.get("USE_LLM", "1") == "1"
+    force_llm = os.environ.get("FORCE_LLM", "0") == "1"
     api_base_url = os.environ.get("API_BASE_URL")
     model_name = os.environ.get("MODEL_NAME")
     hf_token = os.environ.get("HF_TOKEN")
@@ -1012,14 +1013,27 @@ def main() -> None:
                 llm_improved = _multi_start_improve(obs, llm_action, seeds_k=10)
                 llm_improved_cost, _, llm_improved_ok = _simulate_total_cost(obs, llm_improved)
 
-                if llm_ok and llm_cost <= best_cost + 1e-9:
-                    action = llm_action
-                    planner = "llm"
-                    best_cost = llm_cost
-                if llm_improved_ok and llm_improved_cost <= best_cost + 1e-9:
-                    action = llm_improved
-                    planner = "llm_improve"
-                    best_cost = llm_improved_cost
+                if force_llm:
+                    if llm_improved_ok:
+                        action = llm_improved
+                        planner = "llm_improve"
+                    elif llm_ok:
+                        action = llm_action
+                        planner = "llm"
+                    else:
+                        action = InventoryTransferAction(transfers=[])
+                        planner = "empty"
+                    best_cost = llm_improved_cost if llm_improved_ok else (llm_cost if llm_ok else float("inf"))
+                else:
+                    if llm_ok and llm_cost <= best_cost + 1e-9:
+                        action = llm_action
+                        planner = "llm"
+                        best_cost = llm_cost
+
+                    if llm_improved_ok and llm_improved_cost <= best_cost + 1e-9:
+                        action = llm_improved
+                        planner = "llm_improve"
+                        best_cost = llm_improved_cost
             except Exception:
                 pass
 

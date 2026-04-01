@@ -796,7 +796,6 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
 
     x: Dict[tuple[str, str, str], pywraplp.Variable] = {}
     y: Dict[tuple[str, str], pywraplp.Variable] = {}
-    z: Dict[tuple[str, str, str], pywraplp.Variable] = {}
 
     for i in wh_ids:
         for j in wh_ids:
@@ -805,8 +804,6 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
             y[(i, j)] = solver.IntVar(0.0, 1.0, f"y_{i}_{j}")
             for p in products:
                 x[(i, j, p)] = solver.IntVar(0.0, solver.infinity(), f"x_{i}_{j}_{p}")
-                if obs.min_transfer_lot and int(obs.min_transfer_lot.get(p, 0) or 0) > 0:
-                    z[(i, j, p)] = solver.IntVar(0.0, 1.0, f"z_{i}_{j}_{p}")
 
     shortage: Dict[tuple[str, str], pywraplp.Variable] = {}
     for j in wh_ids:
@@ -864,14 +861,19 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
                 outflow = sum(x[(j, k, p)] for k in wh_ids if k != j)
                 solver.Add(inv0[(j, p)] + inflow - outflow <= int(cap))
 
-    # Min transfer lots
+    # Min transfer lots: enforce x is always a multiple of lot via x = lot * k
     if obs.min_transfer_lot:
-        for (i, j, p), lot_z in z.items():
-            lot = int(obs.min_transfer_lot.get(p, 0) or 0)
-            if lot <= 0:
-                continue
-            solver.Add(x[(i, j, p)] >= lot * lot_z)
-            solver.Add(x[(i, j, p)] <= inv0[(i, p)] * lot_z)
+        for i in wh_ids:
+            for j in wh_ids:
+                if i == j:
+                    continue
+                for p in products:
+                    lot = int(obs.min_transfer_lot.get(p, 0) or 0)
+                    if lot <= 0:
+                        continue
+                    max_k = inv0[(i, p)] // lot
+                    k = solver.IntVar(0, max_k, f"k_{i}_{j}_{p}")
+                    solver.Add(x[(i, j, p)] == lot * k)
 
     # Lane activation
     for (i, j), yvar in y.items():
@@ -937,7 +939,7 @@ def main() -> None:
     print_planner = os.environ.get("PRINT_PLANNER", "0") == "1"
 
     use_mip = os.environ.get("USE_MIP", "1") == "1"
-    mip_time_limit_ms = int(os.environ.get("MIP_TIME_LIMIT_MS", "800"))
+    mip_time_limit_ms = int(os.environ.get("MIP_TIME_LIMIT_MS", "120000"))
 
     # Default to LLM mode when variables are present, but fall back safely to greedy if not.
     use_llm = os.environ.get("USE_LLM", "1") == "1"
@@ -989,10 +991,14 @@ def main() -> None:
         mip_ok = False
         if use_mip:
             try:
-                mip_action = _mip_plan(obs, time_limit_ms=mip_time_limit_ms)
-                mip_action = _repair_action(obs, mip_action)
-                mip_action = _multi_start_improve(obs, mip_action, seeds_k=8)
-                mip_cost, _, mip_ok = _simulate_total_cost(obs, mip_action)
+                mip_raw = _mip_plan(obs, time_limit_ms=mip_time_limit_ms)
+                mip_cost, _, mip_ok = _simulate_total_cost(obs, mip_raw)
+                # MIP is already globally optimal; skip _repair_action and
+                # _multi_start_improve — both call _repair_action internally
+                # which processes transfers sequentially and incorrectly drops
+                # transfers whose feasibility depends on earlier transfers
+                # increasing intermediate inventory (e.g. W1->W8 then W8->W2).
+                mip_action = mip_raw if mip_ok else None
             except Exception:
                 mip_action = None
 

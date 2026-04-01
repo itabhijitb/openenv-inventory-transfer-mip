@@ -3,6 +3,7 @@ from inventory_transfer_env.server.inventory_transfer_environment import (
     InventoryTransferEnvironment,
 )
 from openenv.core.env_server import create_app
+import os
 
 app = create_app(
     InventoryTransferEnvironment,
@@ -17,9 +18,17 @@ def root() -> dict:
     return {"status": "ok", "env": "inventory_transfer_env"}
 
 
+@app.get("/debug/env")
+def debug_env() -> dict:
+    return {
+        "has_API_BASE_URL": bool(os.environ.get("API_BASE_URL")),
+        "has_MODEL_NAME": bool(os.environ.get("MODEL_NAME")),
+        "has_HF_TOKEN": bool(os.environ.get("HF_TOKEN")),
+    }
+
+
 def main():
     import uvicorn
-    import os
 
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))

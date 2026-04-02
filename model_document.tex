@@ -57,8 +57,11 @@ This document presents:
 \begin{enumerate}[noitemsep]
   \item the \textbf{single-step MIP} (the canonical formulation used by
         both the grader and the baseline inference agent);
-  \item the \textbf{multi-step rolling-horizon extension};
-  \item the \textbf{stochastic demand extension};
+  \item the \textbf{multi-step rolling-horizon extension} ($T > 1$
+        steps, inventory carry-forward, per-step capacity reset);
+  \item the \textbf{stochastic demand extension} (per-episode demand
+        sampling; two tasks: single-step stochastic and the combined
+        stochastic $+$ multi-step task);
   \item the \textbf{scoring formula} used to evaluate agent actions.
 \end{enumerate}
 
@@ -379,8 +382,8 @@ variables} rather than a pure binary problem.
 % ============================================================
 \section{Multi-Step Extension ($T > 1$)}
 
-For tasks with $T > 1$ steps (e.g., \texttt{rolling\_3day}), the
-episode is extended to a finite horizon.
+For tasks with $T > 1$ steps (e.g., \texttt{rolling\_3day} and
+\texttt{noisy\_rolling}), the episode is extended to a finite horizon.
 
 \subsection{State evolution}
 
@@ -482,7 +485,10 @@ agent uses a \textbf{receding-horizon} (model-predictive control) strategy:
 % ============================================================
 \section{Stochastic Demand Extension}
 
-The \texttt{noisy\_demand} task introduces \textbf{uncertain demand}.
+Two tasks introduce \textbf{uncertain demand}: \texttt{noisy\_demand}
+(single-step, $T=1$) and \texttt{noisy\_rolling} (multi-step, $T=3$).
+Both share the same demand-sampling mechanism.
+
 The task specification stores nominal (mean) demand $\bar{d}_{jp}$ and a
 noise fraction $\eta$ (\texttt{demand\_noise\_pct}).  When
 \texttt{reset()} is called with a random seed $\omega$, realised demand
@@ -500,8 +506,10 @@ is sampled as:
   \label{eq:stochastic-demand}
 \end{equation}
 
-with $\eta = 0.25$ for the \texttt{noisy\_demand} task.  The clamping to
-$[0, 2\bar{d}_{jp}]$ prevents negative or unrealistically large demands.
+The noise level differs between the two tasks: $\eta = 0.25$ for
+\texttt{noisy\_demand} and $\eta = 0.20$ for \texttt{noisy\_rolling}.
+The clamping to $[0, 2\bar{d}_{jp}]$ prevents negative or unrealistically
+large demands.
 
 \begin{remark}
   Calling \texttt{reset()} without a seed uses the deterministic mean
@@ -509,10 +517,20 @@ $[0, 2\bar{d}_{jp}]$ prevents negative or unrealistically large demands.
   the determinism invariant required by the OpenEnv validator.
 \end{remark}
 
-The grader always re-solves the MIP \eqref{eq:stochastic-demand} against
-the \emph{realised} demand $d_{jp}^{(\omega)}$, so a score of $1.0$ is
-still achievable — the challenge is learning policies robust to demand
-variability rather than memorising fixed instances.
+\subsection{Combined stochastic + multi-step (\texttt{noisy\_rolling})}
+
+The \texttt{noisy\_rolling} task is the only instance that combines both
+extensions: demand is sampled stochastically at episode start and the
+agent must plan over a $T=3$ rolling horizon with inventory carry-forward
+and per-step lane capacity reset.  The grader re-solves the MIP against
+the \emph{realised} demand at the terminal step, so a score of $1.0$ is
+still achievable.  The interaction between demand uncertainty and
+multi-step planning makes this the most challenging task in the suite.
+
+The grader always re-solves the MIP against the \emph{realised} demand
+$d_{jp}^{(\omega)}$, so a score of $1.0$ is still achievable — the
+challenge is learning policies robust to demand variability rather than
+memorising fixed instances.
 
 % ============================================================
 \section{Grader and Scoring}
@@ -680,10 +698,12 @@ An empty list \texttt{[]} is always valid (no transfers).
 \texttt{noisy\_demand} & 1 & 5 & 2 & C6, C7, C8 &
   $d_{jp} \sim \mathcal{N}(\bar{d}_{jp}, \eta^2 \bar{d}_{jp}^2)$,\;
   $\eta=0.25$ \\
+\texttt{noisy\_rolling} & 3 & 5 & 2 & C6, C7, C8 &
+  Stochastic ($\eta=0.20$) + 3-step rolling horizon \\
 \bottomrule
 \end{tabular}
 \caption{%
-  Summary of the ten task instances.
+  Summary of the eleven task instances.
   ``All'' constraints = C1--C10 (inventory, shortage, activation,
   outbound, inbound, lane, SKU, lot, budget, integrality).
 }

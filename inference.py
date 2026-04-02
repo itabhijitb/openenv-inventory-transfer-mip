@@ -7,6 +7,7 @@ import re
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any, cast
 
 from openai import OpenAI
 from ortools.linear_solver import pywraplp
@@ -652,6 +653,8 @@ def _run_multi_step_episode(base_url: str, task_id: str, mip_time_limit_ms: int)
                     step_result = env.step(step_action)
                     if not step_result.done:
                         current_obs = step_result.observation
+                if step_result is None:
+                    raise RuntimeError("Episode produced no step results")
                 return step_result
         except Exception as e:
             last = e
@@ -836,6 +839,9 @@ def _mip_plan(obs: InventoryTransferObservation, time_limit_ms: int = 800) -> In
         return InventoryTransferAction(transfers=[])
     solver.SetTimeLimit(int(time_limit_ms))
 
+    def _v(expr: pywraplp.LinearExpr | pywraplp.Variable) -> Any:
+        return cast(Any, expr)
+
     x: dict[tuple[str, str, str], pywraplp.Variable] = {}
     y: dict[tuple[str, str], pywraplp.Variable] = {}
 
@@ -897,7 +903,7 @@ def _mip_plan(obs: InventoryTransferObservation, time_limit_ms: int = 800) -> In
                     continue
                 for p, cap in by_p.items():
                     if p in products:
-                        solver.Add(x[(i, j, p)] <= int(cap))
+                        solver.Add(_v(x[(i, j, p)]) <= int(cap))
 
     # SKU caps after transfers
     if obs.sku_capacity:
@@ -931,18 +937,18 @@ def _mip_plan(obs: InventoryTransferObservation, time_limit_ms: int = 800) -> In
         if max_out <= 0:
             solver.Add(yvar == 0)
             continue
-        solver.Add(solver.Sum([x[(i, j, p)] for p in products]) <= max_out * yvar)
+        solver.Add(_v(solver.Sum([x[(i, j, p)] for p in products])) <= max_out * _v(yvar))
 
     # Budget
     if obs.budget is not None:
         solver.Add(
             solver.Sum([
-                float(obs.transfer_cost[i][j]) * x[(i, j, p)]
+                float(obs.transfer_cost[i][j]) * _v(x[(i, j, p)])
                 for (i, j, p) in x.keys()
             ])
             + (
                 solver.Sum([
-                    float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * y[(i, j)]
+                    float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * _v(y[(i, j)])
                     for (i, j) in y.keys()
                 ])
                 if obs.lane_fixed_cost
@@ -953,19 +959,19 @@ def _mip_plan(obs: InventoryTransferObservation, time_limit_ms: int = 800) -> In
 
     solver.Minimize(
         solver.Sum([
-            float(obs.transfer_cost[i][j]) * x[(i, j, p)]
+            float(obs.transfer_cost[i][j]) * _v(x[(i, j, p)])
             for (i, j, p) in x.keys()
         ])
         + (
             solver.Sum([
-                float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * y[(i, j)]
+                float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * _v(y[(i, j)])
                 for (i, j) in y.keys()
             ])
             if obs.lane_fixed_cost
             else 0.0
         )
         + float(obs.penalty_per_unit_shortage)
-        * solver.Sum([shortage[(j, p)] for j in wh_ids for p in products])
+        * solver.Sum([_v(shortage[(j, p)]) for j in wh_ids for p in products])
     )
 
     status = solver.Solve()

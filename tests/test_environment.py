@@ -51,6 +51,7 @@ def test_step_score_bounds_and_done_flag() -> None:
     step = env.step(InventoryTransferAction(transfers=[]))
 
     assert step.done is True
+    assert step.score is not None
     assert 0.0 <= float(step.score) <= 1.0
 
 
@@ -124,6 +125,7 @@ def test_optimal_score_achievable_on_easy() -> None:
     # Submit empty action and confirm score reflects shortage cost
     # (we just verify the grader runs and returns a score in range)
     step = env.step(InventoryTransferAction(transfers=[]))
+    assert step.score is not None
     assert 0.0 <= float(step.score) <= 1.0
     assert step.optimal_cost is not None
     assert abs(step.optimal_cost - opt_cost) < 1e-3, (

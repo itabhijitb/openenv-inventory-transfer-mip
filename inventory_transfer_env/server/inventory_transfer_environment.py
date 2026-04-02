@@ -6,6 +6,7 @@ import uuid
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, cast
 
 from openenv.core.env_server.interfaces import Action, Environment
 from ortools.linear_solver import pywraplp
@@ -64,6 +65,9 @@ def _solve_optimal_mip(
     if solver is None:
         raise RuntimeError("OR-Tools SCIP solver is not available")
 
+    def _v(expr: pywraplp.LinearExpr | pywraplp.Variable) -> Any:
+        return cast(Any, expr)
+
     x: dict[tuple[str, str, str], pywraplp.Variable] = {}
     y_lane: dict[tuple[str, str], pywraplp.Variable] = {}
     for i in wh_ids:
@@ -83,7 +87,7 @@ def _solve_optimal_mip(
     for i in wh_ids:
         for p in products:
             solver.Add(
-                sum(x[(i, j, p)] for j in wh_ids if j != i) <= inv[(i, p)]
+                _v(solver.Sum([x[(i, j, p)] for j in wh_ids if j != i])) <= inv[(i, p)]
             )
 
     # Optional aggregate outbound/inbound capacities
@@ -92,11 +96,10 @@ def _solve_optimal_mip(
             if i not in wh_ids:
                 continue
             solver.Add(
-                sum(
-                    x[(i, j, p)]
-                    for j in wh_ids
-                    for p in products
-                    if j != i
+                _v(
+                    solver.Sum(
+                        [x[(i, j, p)] for j in wh_ids for p in products if j != i]
+                    )
                 )
                 <= cap
             )
@@ -106,11 +109,10 @@ def _solve_optimal_mip(
             if j not in wh_ids:
                 continue
             solver.Add(
-                sum(
-                    x[(i, j, p)]
-                    for i in wh_ids
-                    for p in products
-                    if i != j
+                _v(
+                    solver.Sum(
+                        [x[(i, j, p)] for i in wh_ids for p in products if i != j]
+                    )
                 )
                 <= cap
             )
@@ -118,22 +120,30 @@ def _solve_optimal_mip(
     # Shortage definition
     for j in wh_ids:
         for p in products:
-            inflow = sum(x[(i, j, p)] for i in wh_ids if i != j)
-            outflow = sum(x[(j, k, p)] for k in wh_ids if k != j)
+            inflow = solver.Sum([x[(i, j, p)] for i in wh_ids if i != j])
+            outflow = solver.Sum([x[(j, k, p)] for k in wh_ids if k != j])
             # shortage >= demand - (inv + inflow - outflow)
-            solver.Add(shortage[(j, p)] >= dem[(j, p)] - (inv[(j, p)] + inflow - outflow))
+            solver.Add(
+                _v(shortage[(j, p)]) >= dem[(j, p)] - (inv[(j, p)] + _v(inflow) - _v(outflow))
+            )
 
     # Budget constraint
     if budget is not None:
         solver.Add(
-            sum(
-                transfer_cost[i][j] * x[(i, j, p)]
-                for (i, j, p) in x.keys()
+            _v(
+                solver.Sum(
+                    [transfer_cost[i][j] * _v(x[(i, j, p)]) for (i, j, p) in x.keys()]
+                )
             )
             + (
-                sum(
-                    float(lane_fixed_cost.get(i, {}).get(j, 0.0)) * y_lane[(i, j)]
-                    for (i, j) in y_lane.keys()
+                _v(
+                    solver.Sum(
+                        [
+                            float(lane_fixed_cost.get(i, {}).get(j, 0.0))
+                            * _v(y_lane[(i, j)])
+                            for (i, j) in y_lane.keys()
+                        ]
+                    )
                 )
                 if lane_fixed_cost
                 else 0.0
@@ -150,7 +160,7 @@ def _solve_optimal_mip(
                 for p, cap in by_product.items():
                     if p not in products:
                         continue
-                    solver.Add(x[(i, j, p)] <= int(cap))
+                    solver.Add(_v(x[(i, j, p)]) <= int(cap))
 
     # SKU capacity constraints at each warehouse after transfers
     if sku_capacity:
@@ -160,9 +170,9 @@ def _solve_optimal_mip(
                 cap = by_product.get(p)
                 if cap is None:
                     continue
-                inflow = sum(x[(i, j, p)] for i in wh_ids if i != j)
-                outflow = sum(x[(j, k, p)] for k in wh_ids if k != j)
-                solver.Add(inv[(j, p)] + inflow - outflow <= int(cap))
+                inflow = solver.Sum([x[(i, j, p)] for i in wh_ids if i != j])
+                outflow = solver.Sum([x[(j, k, p)] for k in wh_ids if k != j])
+                solver.Add(inv[(j, p)] + _v(inflow) - _v(outflow) <= int(cap))
 
     # Min transfer lot: enforce x is an exact multiple of lot via x = lot * k
     if min_transfer_lot:
@@ -184,20 +194,24 @@ def _solve_optimal_mip(
         if max_out <= 0:
             solver.Add(y_lane[(i, j)] == 0)
             continue
-        solver.Add(sum(x[(i, j, p)] for p in products) <= max_out * y_lane[(i, j)])
+        solver.Add(
+            _v(solver.Sum([x[(i, j, p)] for p in products])) <= max_out * _v(y_lane[(i, j)])
+        )
 
     solver.Minimize(
-        sum(transfer_cost[i][j] * x[(i, j, p)] for (i, j, p) in x.keys())
+        solver.Sum([transfer_cost[i][j] * _v(x[(i, j, p)]) for (i, j, p) in x.keys()])
         + (
-            sum(
-                float(lane_fixed_cost.get(i, {}).get(j, 0.0)) * y_lane[(i, j)]
-                for (i, j) in y_lane.keys()
+            solver.Sum(
+                [
+                    float(lane_fixed_cost.get(i, {}).get(j, 0.0)) * _v(y_lane[(i, j)])
+                    for (i, j) in y_lane.keys()
+                ]
             )
             if lane_fixed_cost
             else 0.0
         )
         + penalty_per_unit_shortage
-        * sum(shortage[(j, p)] for j in wh_ids for p in products)
+        * solver.Sum([_v(shortage[(j, p)]) for j in wh_ids for p in products])
     )
 
     status = solver.Solve()

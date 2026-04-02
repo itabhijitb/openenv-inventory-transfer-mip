@@ -7,7 +7,7 @@ from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 
-from openenv.core.env_server.interfaces import Action, Environment, Observation
+from openenv.core.env_server.interfaces import Action, Environment
 from ortools.linear_solver import pywraplp
 
 from ..models import (
@@ -280,7 +280,7 @@ class InventoryTransferEnvironment(Environment):
         self._state = InventoryTransferState(episode_id=str(uuid.uuid4()), step_count=0)
         self._problem: InventoryTransferObservation | None = None
 
-    def reset(self, task_id: str = "easy", **kwargs) -> Observation:
+    def reset(self, task_id: str = "easy", **kwargs) -> InventoryTransferObservation:
         """Load task `task_id` and return the initial observation.
 
         Initialises per-episode state: live inventory (mutated by step()),
@@ -323,7 +323,7 @@ class InventoryTransferEnvironment(Environment):
         obs.done = False
         return obs
 
-    def step(self, action: Action, **kwargs) -> Observation:
+    def step(self, action: Action, **kwargs) -> InventoryTransferObservation:
         """Apply `action` and return the updated observation.
 
         Validates every transfer against inventory, lot sizes, lane/outbound/

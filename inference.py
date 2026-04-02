@@ -11,13 +11,16 @@ from pathlib import Path
 from openai import OpenAI
 from ortools.linear_solver import pywraplp
 
-from inventory_transfer_env import InventoryTransferAction, InventoryTransferEnv, Transfer
+from inventory_transfer_env import (
+    InventoryTransferAction,
+    InventoryTransferEnv,
+    InventoryTransferObservation,
+    Transfer,
+)
 
 
 def _greedy_plan(obs) -> InventoryTransferAction:
     products = obs.products
-
-    inv: dict[str, dict[str, int]] = {w.id: dict(w.inventory) for w in obs.warehouses}
 
     transfers: list[Transfer] = []
 
@@ -55,12 +58,12 @@ def _greedy_plan(obs) -> InventoryTransferAction:
         surplus: dict[str, int] = {}
         deficit: dict[str, int] = {}
         for w in obs.warehouses:
-            inv = int(w.inventory.get(p, 0))
-            dem = int(w.demand.get(p, 0))
-            if inv > dem:
-                surplus[w.id] = inv - dem
-            elif dem > inv:
-                deficit[w.id] = dem - inv
+            inv_units = int(w.inventory.get(p, 0))
+            dem_units = int(w.demand.get(p, 0))
+            if inv_units > dem_units:
+                surplus[w.id] = inv_units - dem_units
+            elif dem_units > inv_units:
+                deficit[w.id] = dem_units - inv_units
 
         while surplus and deficit and remaining_budget > 1e-9:
             # pick best (i,j) lane cost
@@ -821,7 +824,7 @@ def _llm_plan(client: OpenAI, model_name: str, obs) -> InventoryTransferAction:
     return InventoryTransferAction.model_validate(data)
 
 
-def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
+def _mip_plan(obs: InventoryTransferObservation, time_limit_ms: int = 800) -> InventoryTransferAction:
     wh_ids = [w.id for w in obs.warehouses]
     products = list(obs.products)
 
@@ -852,28 +855,36 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
     # Inventory availability
     for i in wh_ids:
         for p in products:
-            solver.Add(sum(x[(i, j, p)] for j in wh_ids if j != i) <= inv0[(i, p)])
+            solver.Add(
+                solver.Sum([x[(i, j, p)] for j in wh_ids if j != i]) <= inv0[(i, p)]
+            )
 
     # Outbound/inbound capacities
     if obs.outbound_capacity:
         for i, cap in obs.outbound_capacity.items():
             if i in wh_ids:
                 solver.Add(
-                    sum(x[(i, j, p)] for j in wh_ids for p in products if j != i) <= int(cap)
+                    solver.Sum(
+                        [x[(i, j, p)] for j in wh_ids for p in products if j != i]
+                    )
+                    <= int(cap)
                 )
 
     if obs.inbound_capacity:
         for j, cap in obs.inbound_capacity.items():
             if j in wh_ids:
                 solver.Add(
-                    sum(x[(i, j, p)] for i in wh_ids for p in products if i != j) <= int(cap)
+                    solver.Sum(
+                        [x[(i, j, p)] for i in wh_ids for p in products if i != j]
+                    )
+                    <= int(cap)
                 )
 
     # Shortage definition (flow balance)
     for j in wh_ids:
         for p in products:
-            inflow = sum(x[(i, j, p)] for i in wh_ids if i != j)
-            outflow = sum(x[(j, k, p)] for k in wh_ids if k != j)
+            inflow = solver.Sum([x[(i, j, p)] for i in wh_ids if i != j])
+            outflow = solver.Sum([x[(j, k, p)] for k in wh_ids if k != j])
             solver.Add(shortage[(j, p)] >= dem0[(j, p)] - (inv0[(j, p)] + inflow - outflow))
 
     # Lane caps
@@ -896,8 +907,8 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
                 cap = by_p.get(p)
                 if cap is None:
                     continue
-                inflow = sum(x[(i, j, p)] for i in wh_ids if i != j)
-                outflow = sum(x[(j, k, p)] for k in wh_ids if k != j)
+                inflow = solver.Sum([x[(i, j, p)] for i in wh_ids if i != j])
+                outflow = solver.Sum([x[(j, k, p)] for k in wh_ids if k != j])
                 solver.Add(inv0[(j, p)] + inflow - outflow <= int(cap))
 
     # Min transfer lots: enforce x is always a multiple of lot via x = lot * k
@@ -920,14 +931,20 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
         if max_out <= 0:
             solver.Add(yvar == 0)
             continue
-        solver.Add(sum(x[(i, j, p)] for p in products) <= max_out * yvar)
+        solver.Add(solver.Sum([x[(i, j, p)] for p in products]) <= max_out * yvar)
 
     # Budget
     if obs.budget is not None:
         solver.Add(
-            sum(float(obs.transfer_cost[i][j]) * x[(i, j, p)] for (i, j, p) in x.keys())
+            solver.Sum([
+                float(obs.transfer_cost[i][j]) * x[(i, j, p)]
+                for (i, j, p) in x.keys()
+            ])
             + (
-                sum(float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * y[(i, j)] for (i, j) in y.keys())
+                solver.Sum([
+                    float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * y[(i, j)]
+                    for (i, j) in y.keys()
+                ])
                 if obs.lane_fixed_cost
                 else 0.0
             )
@@ -935,13 +952,20 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
         )
 
     solver.Minimize(
-        sum(float(obs.transfer_cost[i][j]) * x[(i, j, p)] for (i, j, p) in x.keys())
+        solver.Sum([
+            float(obs.transfer_cost[i][j]) * x[(i, j, p)]
+            for (i, j, p) in x.keys()
+        ])
         + (
-            sum(float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * y[(i, j)] for (i, j) in y.keys())
+            solver.Sum([
+                float(obs.lane_fixed_cost.get(i, {}).get(j, 0.0)) * y[(i, j)]
+                for (i, j) in y.keys()
+            ])
             if obs.lane_fixed_cost
             else 0.0
         )
-        + float(obs.penalty_per_unit_shortage) * sum(shortage[(j, p)] for j in wh_ids for p in products)
+        + float(obs.penalty_per_unit_shortage)
+        * solver.Sum([shortage[(j, p)] for j in wh_ids for p in products])
     )
 
     status = solver.Solve()

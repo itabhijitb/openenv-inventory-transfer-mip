@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
-
 from openenv.core.env_server.interfaces import Action, Observation, State
 from pydantic import BaseModel, Field
 
 
 class Warehouse(BaseModel):
     id: str
-    inventory: Dict[str, int]
-    demand: Dict[str, int]
+    inventory: dict[str, int]
+    demand: dict[str, int]
 
 
 class Transfer(BaseModel):
@@ -20,26 +18,26 @@ class Transfer(BaseModel):
 
 
 class InventoryTransferAction(Action):
-    transfers: List[Transfer] = Field(default_factory=list)
+    transfers: list[Transfer] = Field(default_factory=list)
 
 
 class InventoryTransferObservation(Observation):
     task_id: str
-    warehouses: List[Warehouse]
-    products: List[str]
-    transfer_cost: Dict[str, Dict[str, float]]
-    lane_fixed_cost: Optional[Dict[str, Dict[str, float]]] = None
+    warehouses: list[Warehouse]
+    products: list[str]
+    transfer_cost: dict[str, dict[str, float]]
+    lane_fixed_cost: dict[str, dict[str, float]] | None = None
     penalty_per_unit_shortage: float
-    budget: Optional[float] = None
-    outbound_capacity: Optional[Dict[str, int]] = None
-    inbound_capacity: Optional[Dict[str, int]] = None
+    budget: float | None = None
+    outbound_capacity: dict[str, int] | None = None
+    inbound_capacity: dict[str, int] | None = None
 
-    sku_capacity: Optional[Dict[str, Dict[str, int]]] = None
-    lane_capacity: Optional[Dict[str, Dict[str, Dict[str, int]]]] = None
-    min_transfer_lot: Optional[Dict[str, int]] = None
+    sku_capacity: dict[str, dict[str, int]] | None = None
+    lane_capacity: dict[str, dict[str, dict[str, int]]] | None = None
+    min_transfer_lot: dict[str, int] | None = None
 
     # Stochastic demand fields
-    demand_noise_pct: Optional[float] = Field(
+    demand_noise_pct: float | None = Field(
         default=None,
         description=(
             "When set, demand is perturbed by ±noise_pct*mean each episode. "
@@ -50,7 +48,7 @@ class InventoryTransferObservation(Observation):
     # Multi-step episode fields
     max_steps: int = Field(default=1, description="Total steps allowed per episode")
     step_number: int = Field(default=0, description="Current step (1-indexed after first step)")
-    per_step_budget: Optional[float] = Field(
+    per_step_budget: float | None = Field(
         default=None,
         description="Per-step transfer budget (resets each step; overrides episode budget when set)",
     )
@@ -68,21 +66,21 @@ class InventoryTransferObservation(Observation):
     fulfilled_units: int = 0
     fill_rate: float = 0.0
 
-    optimal_cost: Optional[float] = None
-    optimal_feasible: Optional[bool] = None
+    optimal_cost: float | None = None
+    optimal_feasible: bool | None = None
 
-    score: Optional[float] = None
+    score: float | None = None
     disqualified: bool = False
-    dq_reasons: List[str] = Field(default_factory=list)
-    optimality_ratio: Optional[float] = None
-    cost_gap: Optional[float] = None
+    dq_reasons: list[str] = Field(default_factory=list)
+    optimality_ratio: float | None = None
+    cost_gap: float | None = None
     is_feasible: bool = True
-    violations: List[str] = Field(default_factory=list)
+    violations: list[str] = Field(default_factory=list)
 
 
 class InventoryTransferState(State):
     task_id: str = ""
-    current_inventory: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    current_inventory: dict[str, dict[str, int]] = Field(default_factory=dict)
     cumulative_transfer_cost: float = 0.0
     cumulative_lane_activation_cost: float = 0.0
     steps_remaining: int = 1

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
-import math
 import json
+import math
+import os
 import re
 import time
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 from openai import OpenAI
 from ortools.linear_solver import pywraplp
@@ -16,10 +15,11 @@ from inventory_transfer_env import InventoryTransferAction, InventoryTransferEnv
 
 
 def _greedy_plan(obs) -> InventoryTransferAction:
-    wh = {w.id: w for w in obs.warehouses}
     products = obs.products
 
-    transfers: List[Transfer] = []
+    inv: dict[str, dict[str, int]] = {w.id: dict(w.inventory) for w in obs.warehouses}
+
+    transfers: list[Transfer] = []
 
     remaining_budget = float("inf") if obs.budget is None else float(obs.budget)
     remaining_out = None if obs.outbound_capacity is None else {k: int(v) for k, v in obs.outbound_capacity.items()}
@@ -52,8 +52,8 @@ def _greedy_plan(obs) -> InventoryTransferAction:
 
     # Greedy: for each product, send from surplus to deficit by cheapest lane
     for p in products:
-        surplus: Dict[str, int] = {}
-        deficit: Dict[str, int] = {}
+        surplus: dict[str, int] = {}
+        deficit: dict[str, int] = {}
         for w in obs.warehouses:
             inv = int(w.inventory.get(p, 0))
             dem = int(w.demand.get(p, 0))
@@ -64,7 +64,7 @@ def _greedy_plan(obs) -> InventoryTransferAction:
 
         while surplus and deficit and remaining_budget > 1e-9:
             # pick best (i,j) lane cost
-            best: Tuple[str, str, float] | None = None
+            best: tuple[str, str, float] | None = None
             for i in surplus:
                 for j in deficit:
                     c = float(obs.transfer_cost[i][j])
@@ -149,7 +149,7 @@ def _greedy_plan(obs) -> InventoryTransferAction:
     return InventoryTransferAction(transfers=transfers)
 
 
-def _candidate_lane_seeds(obs, top_k: int = 10) -> List[InventoryTransferAction]:
+def _candidate_lane_seeds(obs, top_k: int = 10) -> list[InventoryTransferAction]:
     wh_ids = [w.id for w in obs.warehouses]
     products = list(obs.products)
     inv0 = {(w.id, p): int(w.inventory.get(p, 0)) for w in obs.warehouses for p in products}
@@ -160,7 +160,7 @@ def _candidate_lane_seeds(obs, top_k: int = 10) -> List[InventoryTransferAction]
     }
     lots = {} if obs.min_transfer_lot is None else {p: int(v) for p, v in obs.min_transfer_lot.items()}
 
-    scored: List[tuple[float, str, str, str]] = []
+    scored: list[tuple[float, str, str, str]] = []
     for p in sorted(products):
         lot = int(lots.get(p, 0) or 0)
         q0 = lot if lot > 0 else 1
@@ -189,7 +189,7 @@ def _candidate_lane_seeds(obs, top_k: int = 10) -> List[InventoryTransferAction]
                 scored.append((net, p, i, j))
 
     scored.sort(reverse=True)
-    seeds: List[InventoryTransferAction] = []
+    seeds: list[InventoryTransferAction] = []
     for net, p, i, j in scored[:top_k]:
         _ = net
         lot = int(lots.get(p, 0) or 0)
@@ -209,7 +209,7 @@ def _multi_start_improve(obs, base_action: InventoryTransferAction, *, seeds_k: 
 
     candidate_seeds = _candidate_lane_seeds(obs, top_k=seeds_k)
 
-    actions: List[InventoryTransferAction] = []
+    actions: list[InventoryTransferAction] = []
     actions.append(base_action)
     actions.extend(candidate_seeds)
 
@@ -268,7 +268,7 @@ def _repair_action(obs, action: InventoryTransferAction) -> InventoryTransferAct
     }
     activated_lanes: set[tuple[str, str]] = set()
 
-    repaired: List[Transfer] = []
+    repaired: list[Transfer] = []
     for t in action.transfers:
         if t.from_warehouse not in wh_ids or t.to_warehouse not in wh_ids:
             continue
@@ -551,7 +551,7 @@ def _polish_action(obs, base_action: InventoryTransferAction, max_iters: int = 5
         if math.isfinite(remaining_budget) and spend > remaining_budget + 1e-9:
             if lane_cost <= 0:
                 break
-            q = int((max(0.0, remaining_budget - (lane_fixed if (i, j) not in activated_lanes else 0.0)) // lane_cost))
+            q = int(max(0.0, remaining_budget - (lane_fixed if (i, j) not in activated_lanes else 0.0)) // lane_cost)
             if lot > 0:
                 q = (q // lot) * lot
             if q <= 0:
@@ -674,9 +674,9 @@ def _simulate_total_cost(obs, action: InventoryTransferAction) -> tuple[float, f
     transfer_out = {w: 0 for w in wh_ids}
     transfer_in = {w: 0 for w in wh_ids}
 
-    lane_used: Dict[tuple[str, str, str], int] = {}
+    lane_used: dict[tuple[str, str, str], int] = {}
     transfer_cost_total = 0.0
-    violations: List[str] = []
+    violations: list[str] = []
 
     lots = {} if obs.min_transfer_lot is None else {p: int(v) for p, v in obs.min_transfer_lot.items()}
 
@@ -833,8 +833,8 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
         return InventoryTransferAction(transfers=[])
     solver.SetTimeLimit(int(time_limit_ms))
 
-    x: Dict[tuple[str, str, str], pywraplp.Variable] = {}
-    y: Dict[tuple[str, str], pywraplp.Variable] = {}
+    x: dict[tuple[str, str, str], pywraplp.Variable] = {}
+    y: dict[tuple[str, str], pywraplp.Variable] = {}
 
     for i in wh_ids:
         for j in wh_ids:
@@ -844,7 +844,7 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
             for p in products:
                 x[(i, j, p)] = solver.IntVar(0.0, solver.infinity(), f"x_{i}_{j}_{p}")
 
-    shortage: Dict[tuple[str, str], pywraplp.Variable] = {}
+    shortage: dict[tuple[str, str], pywraplp.Variable] = {}
     for j in wh_ids:
         for p in products:
             shortage[(j, p)] = solver.NumVar(0.0, solver.infinity(), f"short_{j}_{p}")
@@ -948,7 +948,7 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
     if status not in (pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE):
         return InventoryTransferAction(transfers=[])
 
-    transfers: List[Transfer] = []
+    transfers: list[Transfer] = []
     for (i, j, p), var in x.items():
         q = int(round(var.solution_value()))
         if q > 0:
@@ -957,7 +957,7 @@ def _mip_plan(obs, time_limit_ms: int = 800) -> InventoryTransferAction:
     return InventoryTransferAction(transfers=transfers)
 
 
-def _load_task_ids() -> List[str]:
+def _load_task_ids() -> list[str]:
     tasks_path = Path(__file__).resolve().parent / "inventory_transfer_env" / "tasks.json"
     if not tasks_path.exists():
         return ["easy", "medium", "hard", "hard_v1", "hard_v2", "hard_v3", "edge_case"]

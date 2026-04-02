@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 
 from inventory_transfer_env import InventoryTransferAction, Transfer
-from inventory_transfer_env.server.inventory_transfer_environment import InventoryTransferEnvironment
+from inventory_transfer_env.server.inventory_transfer_environment import (
+    InventoryTransferEnvironment,
+)
 
 
 def test_reset_is_deterministic_for_easy() -> None:
@@ -69,8 +71,8 @@ def test_min_transfer_lot_violation_disqualifies() -> None:
 
 def test_grader_lot_multiples_respected() -> None:
     """MIP grader must produce optimal_cost achievable with lot-multiple quantities."""
-    from inventory_transfer_env.server.inventory_transfer_environment import _solve_optimal_mip
     from inventory_transfer_env.models import Warehouse
+    from inventory_transfer_env.server.inventory_transfer_environment import _solve_optimal_mip
 
     warehouses = [
         Warehouse(id="A", inventory={"P1": 50}, demand={"P1": 10}),
@@ -98,7 +100,6 @@ def test_optimal_score_achievable_on_easy() -> None:
     """Agent submitting the MIP-optimal solution should receive score ≈ 1.0."""
     from inventory_transfer_env.server.inventory_transfer_environment import (
         _solve_optimal_mip,
-        _build_task_observation,
     )
 
     env = InventoryTransferEnvironment()

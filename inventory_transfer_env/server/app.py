@@ -1,9 +1,11 @@
+import os
+
+from openenv.core.env_server import create_app
+
 from inventory_transfer_env.models import InventoryTransferAction, InventoryTransferObservation
 from inventory_transfer_env.server.inventory_transfer_environment import (
     InventoryTransferEnvironment,
 )
-from openenv.core.env_server import create_app
-import os
 
 app = create_app(
     InventoryTransferEnvironment,

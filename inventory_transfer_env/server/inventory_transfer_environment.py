@@ -6,7 +6,6 @@ import uuid
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from openenv.core.env_server.interfaces import Action, Environment, Observation
 from ortools.linear_solver import pywraplp
@@ -15,12 +14,11 @@ from ..models import (
     InventoryTransferAction,
     InventoryTransferObservation,
     InventoryTransferState,
-    Transfer,
     Warehouse,
 )
 
 
-def _validate_square_cost_matrix(cost: Dict[str, Dict[str, float]], nodes: List[str]) -> None:
+def _validate_square_cost_matrix(cost: dict[str, dict[str, float]], nodes: list[str]) -> None:
     for i in nodes:
         if i not in cost:
             raise ValueError(f"transfer_cost missing row for warehouse '{i}'")
@@ -31,18 +29,18 @@ def _validate_square_cost_matrix(cost: Dict[str, Dict[str, float]], nodes: List[
 
 def _solve_optimal_mip(
     *,
-    warehouses: List[Warehouse],
-    products: List[str],
-    transfer_cost: Dict[str, Dict[str, float]],
-    lane_fixed_cost: Optional[Dict[str, Dict[str, float]]],
+    warehouses: list[Warehouse],
+    products: list[str],
+    transfer_cost: dict[str, dict[str, float]],
+    lane_fixed_cost: dict[str, dict[str, float]] | None,
     penalty_per_unit_shortage: float,
-    budget: Optional[float],
-    outbound_capacity: Optional[Dict[str, int]],
-    inbound_capacity: Optional[Dict[str, int]],
-    sku_capacity: Optional[Dict[str, Dict[str, int]]],
-    lane_capacity: Optional[Dict[str, Dict[str, Dict[str, int]]]],
-    min_transfer_lot: Optional[Dict[str, int]],
-) -> Tuple[float, bool]:
+    budget: float | None,
+    outbound_capacity: dict[str, int] | None,
+    inbound_capacity: dict[str, int] | None,
+    sku_capacity: dict[str, dict[str, int]] | None,
+    lane_capacity: dict[str, dict[str, dict[str, int]]] | None,
+    min_transfer_lot: dict[str, int] | None,
+) -> tuple[float, bool]:
     """Solve the lateral transshipment MIP to optimality using OR-Tools SCIP.
 
     Returns (optimal_cost, feasible). optimal_cost is the true minimum achievable
@@ -55,8 +53,8 @@ def _solve_optimal_mip(
     wh_ids = [w.id for w in warehouses]
     _validate_square_cost_matrix(transfer_cost, wh_ids)
 
-    inv: Dict[Tuple[str, str], int] = {}
-    dem: Dict[Tuple[str, str], int] = {}
+    inv: dict[tuple[str, str], int] = {}
+    dem: dict[tuple[str, str], int] = {}
     for w in warehouses:
         for p in products:
             inv[(w.id, p)] = int(w.inventory.get(p, 0))
@@ -66,8 +64,8 @@ def _solve_optimal_mip(
     if solver is None:
         raise RuntimeError("OR-Tools SCIP solver is not available")
 
-    x: Dict[Tuple[str, str, str], pywraplp.Variable] = {}
-    y_lane: Dict[Tuple[str, str], pywraplp.Variable] = {}
+    x: dict[tuple[str, str, str], pywraplp.Variable] = {}
+    y_lane: dict[tuple[str, str], pywraplp.Variable] = {}
     for i in wh_ids:
         for j in wh_ids:
             if i == j:
@@ -76,7 +74,7 @@ def _solve_optimal_mip(
             for p in products:
                 x[(i, j, p)] = solver.IntVar(0.0, solver.infinity(), f"x_{i}_{j}_{p}")
 
-    shortage: Dict[Tuple[str, str], pywraplp.Variable] = {}
+    shortage: dict[tuple[str, str], pywraplp.Variable] = {}
     for j in wh_ids:
         for p in products:
             shortage[(j, p)] = solver.NumVar(0.0, solver.infinity(), f"short_{j}_{p}")
@@ -210,10 +208,10 @@ def _solve_optimal_mip(
 
 
 @lru_cache(maxsize=1)
-def _load_tasks() -> Dict[str, InventoryTransferObservation]:
+def _load_tasks() -> dict[str, InventoryTransferObservation]:
     tasks_path = Path(__file__).resolve().parent.parent / "tasks.json"
     raw = json.loads(tasks_path.read_text())
-    tasks: Dict[str, InventoryTransferObservation] = {}
+    tasks: dict[str, InventoryTransferObservation] = {}
     for task_id, payload in raw.items():
         if isinstance(payload, dict):
             payload = {**payload, "task_id": task_id}
@@ -229,10 +227,10 @@ def _build_task_observation(task_id: str) -> InventoryTransferObservation:
 
 
 def _build_inv_dem(
-    warehouses: List[Warehouse], products: List[str]
-) -> Tuple[Dict[Tuple[str, str], int], Dict[Tuple[str, str], int]]:
-    inv: Dict[Tuple[str, str], int] = {}
-    dem: Dict[Tuple[str, str], int] = {}
+    warehouses: list[Warehouse], products: list[str]
+) -> tuple[dict[tuple[str, str], int], dict[tuple[str, str], int]]:
+    inv: dict[tuple[str, str], int] = {}
+    dem: dict[tuple[str, str], int] = {}
     for w in warehouses:
         for p in products:
             inv[(w.id, p)] = int(w.inventory.get(p, 0))
@@ -280,7 +278,7 @@ def _finalize_grading_fields(obs: InventoryTransferObservation) -> None:
 class InventoryTransferEnvironment(Environment):
     def __init__(self):
         self._state = InventoryTransferState(episode_id=str(uuid.uuid4()), step_count=0)
-        self._problem: Optional[InventoryTransferObservation] = None
+        self._problem: InventoryTransferObservation | None = None
 
     def reset(self, task_id: str = "easy", **kwargs) -> Observation:
         """Load task `task_id` and return the initial observation.
@@ -303,7 +301,7 @@ class InventoryTransferEnvironment(Environment):
             rng = random.Random(int(seed))
             perturbed = []
             for w in obs.warehouses:
-                new_demand: Dict[str, int] = {}
+                new_demand: dict[str, int] = {}
                 for p, mean_d in w.demand.items():
                     # Sample demand from Normal; clamp to [0, 2*mean] so negatives/huge values don't arise.
                     sample = rng.gauss(float(mean_d), float(mean_d) * noise_pct)
@@ -350,20 +348,20 @@ class InventoryTransferEnvironment(Environment):
         products = list(obs.products)
 
         # Use live inventory from state (carries across steps); demand is fixed from problem.
-        inv: Dict[Tuple[str, str], int] = {}
-        dem: Dict[Tuple[str, str], int] = {}
+        inv: dict[tuple[str, str], int] = {}
+        dem: dict[tuple[str, str], int] = {}
         for w in obs.warehouses:
             for p in products:
                 inv[(w.id, p)] = int(self._state.current_inventory.get(w.id, {}).get(p, 0))
                 dem[(w.id, p)] = int(w.demand.get(p, 0))
 
-        transfer_out: Dict[str, int] = {w: 0 for w in wh_ids}
-        transfer_in: Dict[str, int] = {w: 0 for w in wh_ids}
-        lane_used: Dict[Tuple[str, str, str], int] = {}
+        transfer_out: dict[str, int] = {w: 0 for w in wh_ids}
+        transfer_in: dict[str, int] = {w: 0 for w in wh_ids}
+        lane_used: dict[tuple[str, str, str], int] = {}
 
         transfer_cost_total = 0.0
         lane_activation_cost_total = 0.0
-        violations: List[str] = []
+        violations: list[str] = []
         is_feasible = True
 
         for t in action.transfers:
@@ -483,7 +481,7 @@ class InventoryTransferEnvironment(Environment):
 
         is_final = (self._state.steps_remaining <= 0)
 
-        updated_warehouses: List[Warehouse] = [
+        updated_warehouses: list[Warehouse] = [
             Warehouse(
                 id=w.id,
                 inventory={p: int(inv[(w.id, p)]) for p in products},

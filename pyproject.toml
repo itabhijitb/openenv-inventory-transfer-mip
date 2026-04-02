@@ -9,7 +9,7 @@
  [project]
 name = "inventory-transfer-env"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-warehouse lateral transshipment optimisation environment for OpenEnv — MIP-graded, 11 tasks, multi-step and stochastic demand support"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110",

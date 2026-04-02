@@ -30,7 +30,7 @@ def main() -> None:
 
     tasks = [
         "easy", "medium", "hard", "hard_v1", "hard_v2", "hard_v3",
-        "edge_case", "hub_spoke", "rolling_3day", "noisy_demand",
+        "edge_case", "hub_spoke", "rolling_3day", "noisy_demand", "noisy_rolling",
     ]
 
     null_scores_run1 = {}

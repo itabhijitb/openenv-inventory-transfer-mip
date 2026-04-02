@@ -77,7 +77,7 @@ def test_grader_lot_multiples_respected() -> None:
 
     warehouses = [
         Warehouse(id="A", inventory={"P1": 50}, demand={"P1": 10}),
-        Warehouse(id="B", inventory={"P1": 0},  demand={"P1": 30}),
+        Warehouse(id="B", inventory={"P1": 0}, demand={"P1": 30}),
     ]
     cost, feasible = _solve_optimal_mip(
         warehouses=warehouses,
@@ -142,9 +142,11 @@ def test_multi_step_inventory_carries_forward() -> None:
     assert obs0.done is False
 
     # Step 1: move 30 units P1 from W1 to W2
-    step1 = env.step(InventoryTransferAction(
-        transfers=[Transfer(from_warehouse="W1", to_warehouse="W2", product="P1", quantity=30)]
-    ))
+    step1 = env.step(
+        InventoryTransferAction(
+            transfers=[Transfer(from_warehouse="W1", to_warehouse="W2", product="P1", quantity=30)]
+        )
+    )
     assert step1.done is False, "Episode should not end after step 1 of 3"
     # W1 inventory for P1 should decrease by 30
     w1_after = next(w for w in step1.warehouses if w.id == "W1")
@@ -169,9 +171,11 @@ def test_multi_step_intermediate_reward_nonzero() -> None:
     env = InventoryTransferEnvironment()
     env.reset(task_id="rolling_3day")
 
-    step = env.step(InventoryTransferAction(
-        transfers=[Transfer(from_warehouse="W1", to_warehouse="W2", product="P1", quantity=30)]
-    ))
+    step = env.step(
+        InventoryTransferAction(
+            transfers=[Transfer(from_warehouse="W1", to_warehouse="W2", product="P1", quantity=30)]
+        )
+    )
     assert step.done is False
     assert step.reward is not None
     assert float(step.reward) < 0.0, "Transfer cost should produce negative reward"
@@ -215,3 +219,30 @@ def test_noisy_demand_stochastic_seed() -> None:
     obs_no_seed2 = env.reset(task_id="noisy_demand")
     demand_no_seed2 = {w.id: w.demand for w in obs_no_seed2.warehouses}
     assert demand_no_seed == demand_no_seed2, "No seed must be deterministic"
+
+
+def test_noisy_rolling_combines_stochastic_and_multistep() -> None:
+    """noisy_rolling must be both multi-step (T=3) and stochastic (noise_pct > 0)."""
+    env = InventoryTransferEnvironment()
+
+    obs = env.reset(task_id="noisy_rolling")
+    assert obs.max_steps == 3
+    assert obs.demand_noise_pct is not None and obs.demand_noise_pct > 0
+
+    # Same seed reproduces demand
+    d1 = {w.id: w.demand for w in env.reset(task_id="noisy_rolling", seed=7).warehouses}
+    d2 = {w.id: w.demand for w in env.reset(task_id="noisy_rolling", seed=7).warehouses}
+    assert d1 == d2, "Same seed must reproduce demand on noisy_rolling"
+
+    # Multi-step: done only after 3 steps
+    env.reset(task_id="noisy_rolling")
+    result = None
+    for step_i in range(1, 4):
+        result = env.step(InventoryTransferAction(transfers=[]))
+        if step_i < 3:
+            assert result.done is False, f"done must be False at step {step_i}"
+        else:
+            assert result.done is True
+    assert result is not None
+    assert result.score is not None
+    assert 0.0 <= float(result.score) <= 1.0

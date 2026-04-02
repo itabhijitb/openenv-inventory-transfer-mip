@@ -148,8 +148,8 @@ This repo is designed to pass the automated gate checks:
   - Root `Dockerfile` + `requirements.txt` provided.
 - **Baseline reproduces**
   - Root `inference.py` finishes without error and prints scores.
-- **10 tasks with graders**
-  - Tasks: `easy`, `medium`, `hard`, `hard_v1`, `hard_v2`, `hard_v3`, `edge_case`, `hub_spoke`, `rolling_3day`, `noisy_demand`.
+- **11 tasks with graders**
+  - Tasks: `easy`, `medium`, `hard`, `hard_v1`, `hard_v2`, `hard_v3`, `edge_case`, `hub_spoke`, `rolling_3day`, `noisy_demand`, `noisy_rolling`.
   - OR-Tools MIP optimal solver produces `optimal_cost` and normalized `score` in `[0,1]`.
   - Multi-step task (`rolling_3day`): 3-step episode with inventory carry-forward and per-step lane capacity reset.
 
@@ -266,6 +266,7 @@ export HF_TOKEN=...       # HF / API key
 | `hub_spoke` | 1 | 6 | 2 | Spoke-to-spoke transfers blocked — route through hub |
 | `rolling_3day` | 3 | 5 | 2 | Lane capacity resets daily — plan across 3 days |
 | `noisy_demand` | 1 | 5 | 2 | **Stochastic**: demand sampled ±25% per episode (pass `seed=` to `reset()`) |
+| `noisy_rolling` | 3 | 5 | 2 | **Stochastic + multi-step**: ±20% demand noise over a 3-step rolling horizon |
 
 ### Stochastic demand task
 

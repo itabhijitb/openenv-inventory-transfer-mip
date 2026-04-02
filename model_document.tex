@@ -1,0 +1,772 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{parskip}
+
+\geometry{margin=2.5cm}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  urlcolor=blue!70!black,
+}
+
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+
+\title{%
+  \textbf{Inventory Transfer Optimisation Environment}\\[6pt]
+  \large Mathematical Model Document\\[4pt]
+  \normalsize Mixed-Integer Programme, Grader, and Stochastic Extension
+}
+\author{OpenEnv --- Inventory Transfer Environment}
+\date{\today}
+
+% ============================================================
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Problem Overview}
+
+The \emph{inventory transfer optimisation} problem models \textbf{lateral
+transshipment} in a multi-warehouse supply network.  Before demand is
+fulfilled, a planner may ship stock between warehouses to reduce overall
+shortages.  Moving stock incurs a per-unit transfer cost and, when a lane
+is opened for the first time in an episode, a one-time fixed activation
+cost.  Unmet demand at the end of the episode incurs a per-unit shortage
+penalty.
+
+The objective is to choose transfer quantities that minimise the sum of
+transfer costs, lane activation costs, and shortage penalties, subject to
+a rich set of operational constraints (budget cap, warehouse outbound and
+inbound throughput limits, per-lane and per-product capacity limits,
+maximum SKU storage levels, and minimum shipment lot sizes).
+
+This document presents:
+\begin{enumerate}[noitemsep]
+  \item the \textbf{single-step MIP} (the canonical formulation used by
+        both the grader and the baseline inference agent);
+  \item the \textbf{multi-step rolling-horizon extension};
+  \item the \textbf{stochastic demand extension};
+  \item the \textbf{scoring formula} used to evaluate agent actions.
+\end{enumerate}
+
+% ============================================================
+\section{Sets and Indices}
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$\mathcal{W}$ & Set of warehouses, indexed $i, j \in \mathcal{W}$,\;
+                $|\mathcal{W}| = n$ \\
+$\mathcal{P}$ & Set of products (SKUs), indexed $p \in \mathcal{P}$,\;
+                $|\mathcal{P}| = m$ \\
+$\mathcal{L}$ & Set of directed lanes,
+                $\mathcal{L} = \{(i,j) : i,j \in \mathcal{W},\; i \neq j\}$ \\
+$\mathcal{T}$ & Set of time steps $\{1, \ldots, T\}$ (single-step: $T=1$) \\
+\bottomrule
+\end{tabular}
+\caption{Sets and indices}
+\end{table}
+
+% ============================================================
+\section{Input Parameters}
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}lp{9.5cm}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$s_{ip}$        & Initial inventory of product $p$ at warehouse $i$
+                  (units, non-negative integer) \\
+$d_{jp}$        & Demand for product $p$ at warehouse $j$
+                  (units, non-negative integer) \\
+$c_{ij}$        & Per-unit transfer cost on lane $(i,j)$
+                  (\$/unit, non-negative real) \\
+$f_{ij}$        & One-time fixed activation cost for lane $(i,j)$
+                  (\$, non-negative real; $0$ if the lane has no fixed cost) \\
+$\pi$           & Penalty per unit of unmet demand (\$/unit, positive real) \\
+$B$             & Episode budget cap (\$; $+\infty$ if unconstrained) \\
+$\hat{B}$       & Per-step budget cap (\$; overrides $B$ when set;
+                  $+\infty$ if unconstrained) \\
+$\text{out}_{i}$& Maximum total units shipped \emph{out} of warehouse $i$
+                  per step (integer; $+\infty$ if unconstrained) \\
+$\text{in}_{j}$ & Maximum total units received \emph{into} warehouse $j$
+                  per step (integer; $+\infty$ if unconstrained) \\
+$u_{ijp}$       & Maximum units of product $p$ on lane $(i,j)$ per step
+                  (integer; $+\infty$ if unconstrained) \\
+$\sigma_{jp}$   & Maximum inventory of product $p$ at warehouse $j$ after
+                  transfers (integer; $+\infty$ if unconstrained) \\
+$\ell_p$        & Minimum transfer lot for product $p$: every non-zero
+                  shipment must be a positive integer multiple of $\ell_p$
+                  (integer $\geq 1$; $0$ if no lot restriction) \\
+\bottomrule
+\end{tabular}
+\caption{Input parameters (all are exposed in the observation)}
+\end{table}
+
+% ============================================================
+\section{Decision Variables}
+
+\subsection{Transfer quantities}
+
+\begin{equation}
+  x_{ijp} \;\in\; \mathbb{Z}_{\geq 0}
+  \qquad \forall\; (i,j) \in \mathcal{L},\; p \in \mathcal{P}
+\end{equation}
+
+$x_{ijp}$ is the number of units of product $p$ shipped from warehouse
+$i$ to warehouse $j$ in a given step.
+
+\subsection{Lane activation indicators}
+
+\begin{equation}
+  y_{ij} \;\in\; \{0, 1\}
+  \qquad \forall\; (i,j) \in \mathcal{L}
+\end{equation}
+
+$y_{ij} = 1$ if \emph{any} product moves on lane $(i,j)$ in a given
+step; $0$ otherwise.  The fixed cost $f_{ij}$ is charged once per step
+per activated lane.
+
+\subsection{Shortage slack}
+
+\begin{equation}
+  \phi_{jp} \;\in\; \mathbb{R}_{\geq 0}
+  \qquad \forall\; j \in \mathcal{W},\; p \in \mathcal{P}
+\end{equation}
+
+$\phi_{jp}$ is the unmet demand for product $p$ at warehouse $j$ after
+all transfers are applied.
+
+\subsection{Lot-multiplier auxiliary variables (when $\ell_p > 0$)}
+
+\begin{equation}
+  k_{ijp} \;\in\; \mathbb{Z}_{\geq 0},
+  \quad k_{ijp} \leq \left\lfloor \tfrac{s_{ip}}{\ell_p} \right\rfloor
+  \qquad \forall\; (i,j) \in \mathcal{L},\; p \in \mathcal{P}
+\end{equation}
+
+Introduced to enforce the lot-size constraint exactly via
+$x_{ijp} = \ell_p \cdot k_{ijp}$.
+
+% ============================================================
+\section{Single-Step Mixed-Integer Programme}
+
+\subsection{Objective function}
+
+\begin{equation}
+  \min_{x,\, y,\, \phi} \quad
+  \underbrace{\sum_{(i,j)\in\mathcal{L}}\sum_{p\in\mathcal{P}}
+    c_{ij}\, x_{ijp}}_{\text{transfer cost}}
+  \;+\;
+  \underbrace{\sum_{(i,j)\in\mathcal{L}}
+    f_{ij}\, y_{ij}}_{\text{lane activation cost}}
+  \;+\;
+  \underbrace{\pi \sum_{j\in\mathcal{W}}\sum_{p\in\mathcal{P}}
+    \phi_{jp}}_{\text{shortage penalty}}
+  \tag{OBJ}
+\end{equation}
+
+\subsection{Constraints}
+
+\subsubsection*{C1 — Inventory availability (supply limit per warehouse per product)}
+
+Each warehouse can ship out at most its initial stock of each product:
+\begin{equation}
+  \sum_{j \in \mathcal{W} \setminus \{i\}} x_{ijp}
+  \;\leq\; s_{ip}
+  \qquad \forall\; i \in \mathcal{W},\; p \in \mathcal{P}
+  \tag{C1}
+\end{equation}
+
+\subsubsection*{C2 — Shortage definition (flow balance)}
+
+Shortage at warehouse $j$ for product $p$ is the residual unmet demand
+after all inflows and outflows:
+\begin{equation}
+  \phi_{jp}
+  \;\geq\;
+  d_{jp}
+  - s_{jp}
+  - \sum_{i \in \mathcal{W} \setminus \{j\}} x_{ijp}
+  + \sum_{k \in \mathcal{W} \setminus \{j\}} x_{jkp}
+  \qquad \forall\; j \in \mathcal{W},\; p \in \mathcal{P}
+  \tag{C2}
+\end{equation}
+
+Because $\phi_{jp} \geq 0$ and the objective minimises shortage, at
+optimality $\phi_{jp}$ equals the residual shortfall when it is positive
+and $0$ otherwise.
+
+\subsubsection*{C3 — Lane activation (big-M linking)}
+
+If any product moves on lane $(i,j)$, the activation flag must be set:
+\begin{equation}
+  \sum_{p \in \mathcal{P}} x_{ijp}
+  \;\leq\;
+  M_{ij}\, y_{ij}
+  \qquad \forall\; (i,j) \in \mathcal{L}
+  \tag{C3}
+\end{equation}
+
+where $M_{ij} = \sum_{p \in \mathcal{P}} s_{ip}$ is a valid big-M
+(total shippable stock from $i$).  If $M_{ij} = 0$, then $y_{ij} = 0$
+is forced directly.
+
+\subsubsection*{C4 — Outbound throughput capacity}
+
+\begin{equation}
+  \sum_{j \in \mathcal{W} \setminus \{i\}} \sum_{p \in \mathcal{P}}
+    x_{ijp}
+  \;\leq\; \text{out}_{i}
+  \qquad \forall\; i \in \mathcal{W} \text{ where } \text{out}_{i} < +\infty
+  \tag{C4}
+\end{equation}
+
+\subsubsection*{C5 — Inbound throughput capacity}
+
+\begin{equation}
+  \sum_{i \in \mathcal{W} \setminus \{j\}} \sum_{p \in \mathcal{P}}
+    x_{ijp}
+  \;\leq\; \text{in}_{j}
+  \qquad \forall\; j \in \mathcal{W} \text{ where } \text{in}_{j} < +\infty
+  \tag{C5}
+\end{equation}
+
+\subsubsection*{C6 — Per-lane, per-product capacity}
+
+\begin{equation}
+  x_{ijp} \;\leq\; u_{ijp}
+  \qquad \forall\; (i,j) \in \mathcal{L},\; p \in \mathcal{P}
+  \text{ where } u_{ijp} < +\infty
+  \tag{C6}
+\end{equation}
+
+A lane with $u_{ijp} = 0$ is \emph{blocked} for product $p$ (used in
+the \texttt{hub\_spoke} task to forbid spoke-to-spoke direct transfers).
+
+\subsubsection*{C7 — SKU storage capacity (post-transfer inventory)}
+
+Net inventory at warehouse $j$ after transfers must not exceed its
+storage limit for product $p$:
+\begin{equation}
+  s_{jp}
+  + \sum_{i \in \mathcal{W} \setminus \{j\}} x_{ijp}
+  - \sum_{k \in \mathcal{W} \setminus \{j\}} x_{jkp}
+  \;\leq\; \sigma_{jp}
+  \qquad \forall\; j \in \mathcal{W},\; p \in \mathcal{P}
+  \text{ where } \sigma_{jp} < +\infty
+  \tag{C7}
+\end{equation}
+
+\subsubsection*{C8 — Minimum transfer lot size}
+
+When $\ell_p > 0$, every shipment must be a non-negative integer
+multiple of $\ell_p$.  This is enforced \emph{exactly} via an auxiliary
+integer multiplier:
+\begin{equation}
+  x_{ijp} = \ell_p \cdot k_{ijp}
+  \qquad \forall\; (i,j) \in \mathcal{L},\; p \in \mathcal{P}
+  \text{ where } \ell_p > 0
+  \tag{C8}
+\end{equation}
+
+\begin{remark}
+  The formulation \textbf{C8} is strictly stronger than the alternative
+  $x_{ijp} \geq \ell_p \cdot z_{ijp}$ with $z_{ijp} \in \{0,1\}$.  That
+  alternative only enforces a minimum \emph{floor}; it does not prevent
+  quantities such as $x = 28$ when $\ell_p = 10$.  Using $x = \ell_p k$
+  guarantees the MIP optimum is always achievable by a valid agent action.
+\end{remark}
+
+\subsubsection*{C9 — Episode budget (cumulative)}
+
+The total spend across transfer costs and lane activation costs must not
+exceed the episode budget $B$:
+\begin{equation}
+  \sum_{(i,j)\in\mathcal{L}}\sum_{p\in\mathcal{P}} c_{ij}\, x_{ijp}
+  \;+\;
+  \sum_{(i,j)\in\mathcal{L}} f_{ij}\, y_{ij}
+  \;\leq\; B
+  \tag{C9}
+\end{equation}
+
+\subsubsection*{C10 — Non-negativity and integrality}
+
+\begin{align}
+  x_{ijp} &\in \mathbb{Z}_{\geq 0}
+    \qquad \forall\; (i,j) \in \mathcal{L},\; p \in \mathcal{P}
+    \tag{C10a} \\
+  y_{ij}  &\in \{0,1\}
+    \qquad \forall\; (i,j) \in \mathcal{L}
+    \tag{C10b} \\
+  \phi_{jp} &\geq 0
+    \qquad \forall\; j \in \mathcal{W},\; p \in \mathcal{P}
+    \tag{C10c} \\
+  k_{ijp} &\in \mathbb{Z}_{\geq 0}
+    \qquad \forall\; (i,j) \in \mathcal{L},\; p \in \mathcal{P}
+    \tag{C10d}
+\end{align}
+
+\subsection{Full formulation (compact form)}
+
+\begin{align}
+\min \quad
+  & \sum_{(i,j)\in\mathcal{L}}\sum_{p\in\mathcal{P}} c_{ij}\, x_{ijp}
+    + \sum_{(i,j)\in\mathcal{L}} f_{ij}\, y_{ij}
+    + \pi \sum_{j\in\mathcal{W}}\sum_{p\in\mathcal{P}} \phi_{jp}
+    \notag \\[4pt]
+\text{s.t.} \quad
+  & \sum_{j \neq i} x_{ijp} \leq s_{ip}
+    && \forall\; i,\, p
+    \tag{C1} \\
+  & \phi_{jp} \geq d_{jp} - s_{jp}
+    - \sum_{i \neq j} x_{ijp} + \sum_{k \neq j} x_{jkp}
+    && \forall\; j,\, p
+    \tag{C2} \\
+  & \sum_{p} x_{ijp} \leq M_{ij}\, y_{ij}
+    && \forall\; (i,j)
+    \tag{C3} \\
+  & \sum_{j \neq i}\sum_{p} x_{ijp} \leq \text{out}_{i}
+    && \forall\; i
+    \tag{C4} \\
+  & \sum_{i \neq j}\sum_{p} x_{ijp} \leq \text{in}_{j}
+    && \forall\; j
+    \tag{C5} \\
+  & x_{ijp} \leq u_{ijp}
+    && \forall\; (i,j),\, p
+    \tag{C6} \\
+  & s_{jp} + \sum_{i \neq j} x_{ijp} - \sum_{k \neq j} x_{jkp}
+    \leq \sigma_{jp}
+    && \forall\; j,\, p
+    \tag{C7} \\
+  & x_{ijp} = \ell_p\, k_{ijp}
+    && \forall\; (i,j),\, p : \ell_p > 0
+    \tag{C8} \\
+  & \sum_{(i,j)}\sum_{p} c_{ij}\, x_{ijp}
+    + \sum_{(i,j)} f_{ij}\, y_{ij} \leq B
+    && \tag{C9} \\
+  & x_{ijp} \in \mathbb{Z}_{\geq 0},\;
+    y_{ij} \in \{0,1\},\;
+    \phi_{jp} \geq 0,\;
+    k_{ijp} \in \mathbb{Z}_{\geq 0}
+    && \tag{C10}
+\end{align}
+
+The problem is a \textbf{Mixed-Integer Linear Programme (MILP)}, solved
+to optimality by OR-Tools SCIP.  Variable $x_{ijp}$ is a general
+(unbounded-above) integer, making this an \textbf{MILP with integer
+variables} rather than a pure binary problem.
+
+% ============================================================
+\section{Multi-Step Extension ($T > 1$)}
+
+For tasks with $T > 1$ steps (e.g., \texttt{rolling\_3day}), the
+episode is extended to a finite horizon.
+
+\subsection{State evolution}
+
+Let $s_{ip}^{(t)}$ denote the inventory of product $p$ at warehouse $i$
+at the beginning of step $t$.  After transfers $x_{ijp}^{(t)}$ are
+applied, inventory evolves as:
+
+\begin{equation}
+  s_{ip}^{(t+1)}
+  = s_{ip}^{(t)}
+  - \sum_{j \neq i} x_{ijp}^{(t)}
+  + \sum_{j \neq i} x_{jip}^{(t)}
+  \qquad \forall\; i \in \mathcal{W},\; p \in \mathcal{P},\;
+  t = 1, \ldots, T-1
+  \label{eq:state-evolution}
+\end{equation}
+
+Initial condition: $s_{ip}^{(1)} = s_{ip}$ (from the task definition).
+
+\subsection{Per-step capacity reset}
+
+Lane capacity $u_{ijp}^{(t)}$, outbound capacity $\text{out}_i^{(t)}$,
+and inbound capacity $\text{in}_j^{(t)}$ \textbf{reset to their nominal
+values at every step}:
+\begin{equation}
+  u_{ijp}^{(t)} = u_{ijp}, \quad
+  \text{out}_i^{(t)} = \text{out}_i, \quad
+  \text{in}_j^{(t)} = \text{in}_j
+  \qquad \forall\; t \in \mathcal{T}
+\end{equation}
+
+This models daily shipping windows: a lane's throughput limit is
+per-day, not per-episode.
+
+\subsection{Per-step budget}
+
+When a per-step budget $\hat{B}$ is defined (field
+\texttt{per\_step\_budget}), it replaces the episode budget for each
+step independently:
+\begin{equation}
+  \sum_{(i,j)}\sum_{p} c_{ij}\, x_{ijp}^{(t)}
+  + \sum_{(i,j)} f_{ij}\, y_{ij}^{(t)}
+  \;\leq\; \hat{B}
+  \qquad \forall\; t \in \mathcal{T}
+  \tag{C9-step}
+\end{equation}
+
+Otherwise the \emph{cumulative} spend across all steps is bounded by
+the episode budget $B$:
+\begin{equation}
+  \sum_{t=1}^{T}
+  \left(
+    \sum_{(i,j)}\sum_{p} c_{ij}\, x_{ijp}^{(t)}
+    + \sum_{(i,j)} f_{ij}\, y_{ij}^{(t)}
+  \right)
+  \;\leq\; B
+  \tag{C9-ep}
+\end{equation}
+
+\subsection{Terminal shortage}
+
+Shortage is assessed only at step $T$ using the final inventory
+$s_{jp}^{(T+1)}$ (post last transfer):
+\begin{equation}
+  \phi_{jp}
+  = \max\!\left(0,\;
+    d_{jp} - s_{jp}^{(T+1)}
+  \right)
+  \qquad \forall\; j \in \mathcal{W},\; p \in \mathcal{P}
+\end{equation}
+
+\subsection{Multi-step objective}
+
+\begin{equation}
+  \min \quad
+  \sum_{t=1}^{T}
+  \left(
+    \sum_{(i,j)}\sum_{p} c_{ij}\, x_{ijp}^{(t)}
+    + \sum_{(i,j)} f_{ij}\, y_{ij}^{(t)}
+  \right)
+  + \pi \sum_{j}\sum_{p} \phi_{jp}
+  \tag{OBJ-T}
+\end{equation}
+
+\subsection{Receding-horizon solution in the inference agent}
+
+Because the multi-step MIP grows exponentially with $T$, the baseline
+agent uses a \textbf{receding-horizon} (model-predictive control) strategy:
+
+\begin{enumerate}[noitemsep]
+  \item At step $t$, observe the current inventory
+        $s_{ip}^{(t)}$ from the server response.
+  \item Solve the \textbf{single-step MIP} (Section~5) using
+        $s_{ip}^{(t)}$ as the starting inventory.
+  \item Apply the resulting transfers; the server updates inventory state.
+  \item Repeat until $t = T$.
+\end{enumerate}
+
+% ============================================================
+\section{Stochastic Demand Extension}
+
+The \texttt{noisy\_demand} task introduces \textbf{uncertain demand}.
+The task specification stores nominal (mean) demand $\bar{d}_{jp}$ and a
+noise fraction $\eta$ (\texttt{demand\_noise\_pct}).  When
+\texttt{reset()} is called with a random seed $\omega$, realised demand
+is sampled as:
+
+\begin{equation}
+  d_{jp}^{(\omega)}
+  \;\sim\;
+  \max\!\left(0,\;
+    \min\!\left(
+      2\bar{d}_{jp},\;
+      \mathcal{N}\!\left(\bar{d}_{jp},\; \eta^2 \bar{d}_{jp}^2\right)
+    \right)
+  \right), \quad \text{rounded to the nearest integer}
+  \label{eq:stochastic-demand}
+\end{equation}
+
+with $\eta = 0.25$ for the \texttt{noisy\_demand} task.  The clamping to
+$[0, 2\bar{d}_{jp}]$ prevents negative or unrealistically large demands.
+
+\begin{remark}
+  Calling \texttt{reset()} without a seed uses the deterministic mean
+  demand $d_{jp} = \bar{d}_{jp}$, preserving backward compatibility and
+  the determinism invariant required by the OpenEnv validator.
+\end{remark}
+
+The grader always re-solves the MIP \eqref{eq:stochastic-demand} against
+the \emph{realised} demand $d_{jp}^{(\omega)}$, so a score of $1.0$ is
+still achievable — the challenge is learning policies robust to demand
+variability rather than memorising fixed instances.
+
+% ============================================================
+\section{Grader and Scoring}
+
+\subsection{Optimal reference cost}
+
+For each episode, the grader solves the full MIP (constraints
+C1--C10) to obtain the provably optimal cost:
+
+\begin{equation}
+  C^* = \min_{x,y,\phi} \text{ (OBJ) subject to C1--C10}
+\end{equation}
+
+The solver is OR-Tools SCIP.  If the MIP is infeasible,
+$C^* = +\infty$ and feasibility is reported as \texttt{False}.
+
+\subsection{Agent cost}
+
+Given the agent's submitted action
+$\mathbf{a} = \{x_{ijp}^{A}\}$, the environment computes:
+
+\begin{equation}
+  C^A
+  = \sum_{(i,j)}\sum_{p} c_{ij}\, x_{ijp}^{A}
+  + \sum_{(i,j) : y_{ij}^A = 1} f_{ij}
+  + \pi \sum_{j}\sum_{p}
+      \max\!\left(0,\; d_{jp} - s_{jp}
+                 - \sum_{i \neq j} x_{ijp}^A
+                 + \sum_{k \neq j} x_{jkp}^A\right)
+\end{equation}
+
+where $y_{ij}^A = \mathbf{1}\bigl[\sum_p x_{ijp}^A > 0\bigr]$.
+
+\subsection{Score}
+
+\begin{equation}
+  \boxed{
+    \text{score}
+    = \frac{C^*}{\max\!\left(C^A,\; C^*\right)}
+    \;\in\; [0,\, 1]
+  }
+  \label{eq:score}
+\end{equation}
+
+Properties of the score:
+\begin{itemize}[noitemsep]
+  \item $\text{score} = 1.0$ iff the agent achieves the MIP-optimal cost
+        $C^A = C^*$.
+  \item $\text{score} \to 0$ as $C^A \to \infty$ (very poor plan).
+  \item $\text{score} = 0.0$ if the agent's action violates any
+        constraint (disqualified); or if $C^* = 0$ or $+\infty$.
+\end{itemize}
+
+\subsection{Disqualification}
+
+A submission is \textbf{disqualified} ($\text{score} = 0$) if any of
+the following hold:
+\begin{enumerate}[noitemsep]
+  \item $x_{ijp}^A < 0$ (negative quantity);
+  \item $\sum_{j \neq i} x_{ijp}^A > s_{ip}$ (inventory overshoot);
+  \item $x_{ijp}^A \not\equiv 0 \pmod{\ell_p}$ for some $p$ with
+        $\ell_p > 0$ (lot-size violation);
+  \item $x_{ijp}^A > u_{ijp}$ (lane capacity exceeded);
+  \item $\sum_{j,p} x_{ijp}^A > \text{out}_i$ (outbound cap exceeded);
+  \item $\sum_{i,p} x_{ijp}^A > \text{in}_j$ (inbound cap exceeded);
+  \item post-transfer inventory at $j$ for product $p$ exceeds
+        $\sigma_{jp}$ (SKU storage cap exceeded);
+  \item total spend $> B$ (episode budget exceeded), or spend this step
+        $> \hat{B}$ (per-step budget exceeded).
+\end{enumerate}
+
+% ============================================================
+\section{Observation and Action Spaces}
+
+\subsection{Observation space}
+
+The observation $\mathcal{O}$ exposed to the agent is a structured
+JSON object with the following fields:
+
+\vspace{4pt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Field} & \textbf{Type} & \textbf{Corresponds to} \\
+\midrule
+\texttt{warehouses}              & list of \{id, inventory, demand\} &
+  $s_{ip}$, $d_{ip}$ \\
+\texttt{products}                & list[str] & $\mathcal{P}$ \\
+\texttt{transfer\_cost}          & dict[i][j] $\to$ float & $c_{ij}$ \\
+\texttt{lane\_fixed\_cost}       & dict[i][j] $\to$ float\,|\,null & $f_{ij}$ \\
+\texttt{penalty\_per\_unit\_shortage} & float & $\pi$ \\
+\texttt{budget}                  & float\,|\,null & $B$ \\
+\texttt{per\_step\_budget}       & float\,|\,null & $\hat{B}$ \\
+\texttt{outbound\_capacity}      & dict[i] $\to$ int\,|\,null & $\text{out}_i$ \\
+\texttt{inbound\_capacity}       & dict[j] $\to$ int\,|\,null & $\text{in}_j$ \\
+\texttt{lane\_capacity}          & dict[i][j][p] $\to$ int\,|\,null & $u_{ijp}$ \\
+\texttt{sku\_capacity}           & dict[j][p] $\to$ int\,|\,null & $\sigma_{jp}$ \\
+\texttt{min\_transfer\_lot}      & dict[p] $\to$ int\,|\,null & $\ell_p$ \\
+\texttt{max\_steps}              & int & $T$ \\
+\texttt{step\_number}            & int & current $t$ \\
+\texttt{demand\_noise\_pct}      & float\,|\,null & $\eta$ \\
+\midrule
+\texttt{score}                   & float\,|\,null & \eqref{eq:score} \\
+\texttt{optimal\_cost}           & float\,|\,null & $C^*$ \\
+\texttt{total\_cost}             & float & $C^A$ \\
+\texttt{fill\_rate}              & float $\in[0,1]$ &
+  $1 - \frac{\sum_{jp}\phi_{jp}}{\sum_{jp}d_{jp}}$ \\
+\texttt{co2\_kg}                 & float &
+  $\sum_{ijp} c_{ij}\, x_{ijp}^A$
+  (cost used as proxy) \\
+\texttt{disqualified}            & bool & any C1--C10 violated \\
+\texttt{dq\_reasons}             & list[str] & violated constraints \\
+\bottomrule
+\end{tabular}
+
+\subsection{Action space}
+
+\begin{equation}
+  \mathbf{a} = \bigl\{(i,\, j,\, p,\, x_{ijp}) :
+    (i,j) \in \mathcal{L},\; p \in \mathcal{P},\;
+    x_{ijp} \in \mathbb{Z}_{\geq 0}\bigr\}
+\end{equation}
+
+Serialised as:
+\begin{verbatim}
+{
+  "transfers": [
+    {"from_warehouse": "W1", "to_warehouse": "W3",
+     "product": "P1", "quantity": 30},
+    ...
+  ]
+}
+\end{verbatim}
+
+An empty list \texttt{[]} is always valid (no transfers).
+
+% ============================================================
+\section{Task Instances}
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}llcclp{5.5cm}@{}}
+\toprule
+\textbf{Task} & \textbf{Steps}$\,T$ & $|\mathcal{W}|$ & $|\mathcal{P}|$
+  & \textbf{Active constraints} & \textbf{Key challenge} \\
+\midrule
+\texttt{easy}        & 1 & 3 & 1 & C3, C6, C7, C8 &
+  Baseline; fixed costs, lot sizes \\
+\texttt{medium}      & 1 & 5 & 3 & C3, C6, C7, C8, C9 &
+  Multi-SKU with budget \\
+\texttt{hard}        & 1 & 8 & 2 & all &
+  All constraints active \\
+\texttt{hard\_v1}    & 1 & 8 & 2 & all &
+  Tighter budget than \texttt{hard} \\
+\texttt{hard\_v2}    & 1 & 8 & 2 & all &
+  Different cost matrix \\
+\texttt{hard\_v3}    & 1 & 8 & 2 & all &
+  Relaxed budget, different costs \\
+\texttt{edge\_case}  & 1 & 4 & 2 & C3, C6, C8 &
+  Adversarial: asymmetric $f_{ij}$, cross-supply trap \\
+\texttt{hub\_spoke}  & 1 & 6 & 2 & C6 &
+  $u_{ijp}=0$ for spoke-to-spoke lanes; hub routing required \\
+\texttt{rolling\_3day} & 3 & 5 & 2 & C6 &
+  Lane capacity resets daily; plan over 3-step horizon \\
+\texttt{noisy\_demand} & 1 & 5 & 2 & C6, C7, C8 &
+  $d_{jp} \sim \mathcal{N}(\bar{d}_{jp}, \eta^2 \bar{d}_{jp}^2)$,\;
+  $\eta=0.25$ \\
+\bottomrule
+\end{tabular}
+\caption{%
+  Summary of the ten task instances.
+  ``All'' constraints = C1--C10 (inventory, shortage, activation,
+  outbound, inbound, lane, SKU, lot, budget, integrality).
+}
+\end{table}
+
+% ============================================================
+\section{Complexity and Solver}
+
+\paragraph{Problem class.}
+The single-step formulation is a \textbf{Mixed-Integer Linear Programme
+(MILP)}.  The decision variables $x_{ijp} \in \mathbb{Z}_{\geq 0}$,
+$y_{ij} \in \{0,1\}$, and $k_{ijp} \in \mathbb{Z}_{\geq 0}$ make the
+feasibility problem NP-complete in the general case.
+
+\paragraph{Variable count.}
+For the \texttt{hard} family ($|\mathcal{W}|=8$, $|\mathcal{P}|=2$):
+\begin{align*}
+  |x| &= |\mathcal{L}| \times |\mathcal{P}|
+       = 8 \times 7 \times 2 = 112 \\
+  |y| &= |\mathcal{L}| = 56 \\
+  |k| &= |\mathcal{L}| \times |\mathcal{P}| = 112 \\
+  |\phi| &= |\mathcal{W}| \times |\mathcal{P}| = 16
+\end{align*}
+Total: 296 variables (all integer or binary).
+
+\paragraph{Solver.}
+Both the grader and the baseline inference agent use
+\textbf{OR-Tools SCIP} (\texttt{pywraplp.Solver.CreateSolver("SCIP")}),
+which applies branch-and-bound with LP relaxation cuts to prove
+optimality.  The grader runs without a time limit; the inference agent
+imposes a default 120\,000\,ms wall-clock limit.
+
+% ============================================================
+\section{Key Identities and Derived Quantities}
+
+\begin{align}
+  \text{fill\_rate}
+  &= 1 - \frac{\displaystyle\sum_{j}\sum_{p} \phi_{jp}}
+              {\displaystyle\sum_{j}\sum_{p} d_{jp}}
+  \;\in [0, 1] \\[6pt]
+  \text{cost\_gap}
+  &= C^A - C^* \;\geq\; 0
+    \quad (\text{zero at optimality}) \\[6pt]
+  \text{optimality\_ratio}
+  &= \frac{C^*}{\max(C^A, C^*)}
+    = \text{score}
+    \quad (\text{when feasible}) \\[6pt]
+  \text{lanes\_activated}
+  &= \bigl|\{(i,j) \in \mathcal{L} : y_{ij}^A = 1\}\bigr| \\[6pt]
+  \text{reward}_t
+  &=
+  \begin{cases}
+    -C^A & \text{if step $t = T$ (final, feasible)} \\
+    -C^A - 10^6 & \text{if step $t = T$ (final, infeasible)} \\
+    -\text{(transfer cost this step)} & \text{if } t < T
+  \end{cases}
+\end{align}
+
+% ============================================================
+\appendix
+\section{Constraint Quick Reference}
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{@{}clp{7cm}c@{}}
+\toprule
+\textbf{Tag} & \textbf{Name} & \textbf{Condition that triggers violation}
+  & \textbf{Disqualifies?} \\
+\midrule
+C1  & Inventory      & $\sum_{j\neq i} x_{ijp}^A > s_{ip}$   & Yes \\
+C2  & Shortage       & (slack definition; never violated)     & --- \\
+C3  & Lane activation & (used in grader; not checked in step) & --- \\
+C4  & Outbound cap   & $\sum_{j,p} x_{ijp}^A > \text{out}_i$ & Yes \\
+C5  & Inbound cap    & $\sum_{i,p} x_{ijp}^A > \text{in}_j$  & Yes \\
+C6  & Lane cap       & $x_{ijp}^A > u_{ijp}$                 & Yes \\
+C7  & SKU cap        & post-transfer inventory $> \sigma_{jp}$& Yes \\
+C8  & Lot size       & $x_{ijp}^A \not\equiv 0\pmod{\ell_p}$ & Yes \\
+C9  & Budget         & cumulative spend $> B$ (or step $> \hat{B}$) & Yes \\
+C10 & Non-negativity & $x_{ijp}^A < 0$                       & Yes \\
+\bottomrule
+\end{tabular}
+\caption{Constraint reference for agent development}
+\end{table}
+
+\end{document}

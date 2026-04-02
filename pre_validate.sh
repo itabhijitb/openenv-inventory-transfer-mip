@@ -38,7 +38,18 @@ cleanup() {
 trap cleanup EXIT
 
 log "${BOLD}Starting local server for inference${NC} ..."
-PORT="${PORT:-8000}"
+if [ -n "${PORT:-}" ]; then
+  PORT="$PORT"
+else
+  PORT=$(python - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)
+fi
 HOST="${HOST:-127.0.0.1}"
 ENV_BASE_URL="http://${HOST}:${PORT}"
 cd "$REPO_DIR"

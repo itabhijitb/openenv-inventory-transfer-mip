@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import uuid
 from copy import deepcopy
 from functools import lru_cache
@@ -42,6 +43,15 @@ def _solve_optimal_mip(
     lane_capacity: Optional[Dict[str, Dict[str, Dict[str, int]]]],
     min_transfer_lot: Optional[Dict[str, int]],
 ) -> Tuple[float, bool]:
+    """Solve the lateral transshipment MIP to optimality using OR-Tools SCIP.
+
+    Returns (optimal_cost, feasible). optimal_cost is the true minimum achievable
+    total cost (transfer + lane activation + shortage penalty) subject to all
+    constraints. feasible=False means no feasible solution exists.
+
+    Lot-size constraint is enforced as x = lot * k (integer multiplier) so the
+    MIP optimum is always achievable by a valid agent action.
+    """
     wh_ids = [w.id for w in warehouses]
     _validate_square_cost_matrix(transfer_cost, wh_ids)
 
@@ -273,7 +283,34 @@ class InventoryTransferEnvironment(Environment):
         self._problem: Optional[InventoryTransferObservation] = None
 
     def reset(self, task_id: str = "easy", **kwargs) -> Observation:
+        """Load task `task_id` and return the initial observation.
+
+        Initialises per-episode state: live inventory (mutated by step()),
+        cumulative cost accumulators, and steps_remaining counter.
+        Multi-step tasks (max_steps > 1) set done=False until the final step.
+
+        Optional kwargs:
+          seed (int): When the task has demand_noise_pct > 0, use this seed to
+              sample demand from Normal(mean, mean*noise_pct) per warehouse/product.
+              Reproducible: same seed produces identical demand. Omit for
+              deterministic behaviour (mean demand used regardless of noise_pct).
+        """
         obs = _build_task_observation(task_id)
+
+        seed = kwargs.get("seed", None)
+        if seed is not None and obs.demand_noise_pct:
+            noise_pct = float(obs.demand_noise_pct)
+            rng = random.Random(int(seed))
+            perturbed = []
+            for w in obs.warehouses:
+                new_demand: Dict[str, int] = {}
+                for p, mean_d in w.demand.items():
+                    # Sample demand from Normal; clamp to [0, 2*mean] so negatives/huge values don't arise.
+                    sample = rng.gauss(float(mean_d), float(mean_d) * noise_pct)
+                    new_demand[p] = max(0, min(int(mean_d * 2), int(round(sample))))
+                perturbed.append(Warehouse(id=w.id, inventory=w.inventory, demand=new_demand))
+            obs.warehouses = perturbed
+
         self._problem = deepcopy(obs)
         self._state = InventoryTransferState(
             episode_id=str(uuid.uuid4()),
@@ -289,6 +326,16 @@ class InventoryTransferEnvironment(Environment):
         return obs
 
     def step(self, action: Action, **kwargs) -> Observation:
+        """Apply `action` and return the updated observation.
+
+        Validates every transfer against inventory, lot sizes, lane/outbound/
+        inbound/SKU capacity, and budget (per-step or cumulative). Any violation
+        sets disqualified=True and score=0.0.
+
+        On non-final steps: returns reward=-transfer_cost_this_step, done=False.
+        On the final step: computes shortage penalty, calls the MIP grader for
+        optimal_cost, and returns score = optimal_cost / max(agent_cost, optimal_cost).
+        """
         if self._problem is None:
             raise RuntimeError("Environment must be reset() before step().")
 

@@ -186,3 +186,29 @@ def test_hub_spoke_task_resets_cleanly() -> None:
     # Spoke-to-spoke lane W2->W3 must have zero capacity
     cap_p1 = obs.lane_capacity.get("W2", {}).get("W3", {}).get("P1", None)
     assert cap_p1 == 0, f"Expected 0 capacity for W2->W3/P1, got {cap_p1}"
+
+
+def test_noisy_demand_stochastic_seed() -> None:
+    """noisy_demand task must produce different demand when different seeds are used,
+    and the same demand when the same seed is reused."""
+    env = InventoryTransferEnvironment()
+
+    obs_seed42a = env.reset(task_id="noisy_demand", seed=42)
+    obs_seed42b = env.reset(task_id="noisy_demand", seed=42)
+    obs_seed99 = env.reset(task_id="noisy_demand", seed=99)
+    obs_no_seed = env.reset(task_id="noisy_demand")
+
+    # Same seed → same demand
+    demand_42a = {w.id: w.demand for w in obs_seed42a.warehouses}
+    demand_42b = {w.id: w.demand for w in obs_seed42b.warehouses}
+    assert demand_42a == demand_42b, "Same seed must produce identical demand"
+
+    # Different seeds → different demand (almost certain for 10 values)
+    demand_99 = {w.id: w.demand for w in obs_seed99.warehouses}
+    assert demand_42a != demand_99, "Different seeds should produce different demand"
+
+    # No seed → deterministic mean demand (task JSON values, no noise applied)
+    demand_no_seed = {w.id: w.demand for w in obs_no_seed.warehouses}
+    obs_no_seed2 = env.reset(task_id="noisy_demand")
+    demand_no_seed2 = {w.id: w.demand for w in obs_no_seed2.warehouses}
+    assert demand_no_seed == demand_no_seed2, "No seed must be deterministic"

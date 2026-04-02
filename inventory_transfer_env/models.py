@@ -38,6 +38,15 @@ class InventoryTransferObservation(Observation):
     lane_capacity: Optional[Dict[str, Dict[str, Dict[str, int]]]] = None
     min_transfer_lot: Optional[Dict[str, int]] = None
 
+    # Stochastic demand fields
+    demand_noise_pct: Optional[float] = Field(
+        default=None,
+        description=(
+            "When set, demand is perturbed by ±noise_pct*mean each episode. "
+            "Pass seed= to reset() for reproducible sampling."
+        ),
+    )
+
     # Multi-step episode fields
     max_steps: int = Field(default=1, description="Total steps allowed per episode")
     step_number: int = Field(default=0, description="Current step (1-indexed after first step)")

@@ -4,6 +4,9 @@ import json
 import math
 import os
 import re
+import socket
+import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -1003,6 +1006,41 @@ def _health_ok(base_url: str, timeout_s: float = 5.0) -> bool:
         return False
 
 
+def _is_localhost_url(url: str) -> bool:
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or ""
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _autostart_server(repo_root: Path) -> tuple[subprocess.Popen[bytes], str]:
+    """Start uvicorn in the background and return (proc, base_url) once /health responds."""
+    port = _free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=str(repo_root),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError("Server process exited unexpectedly during startup.")
+        if _health_ok(base_url, timeout_s=2.0):
+            return proc, base_url
+        time.sleep(0.5)
+    proc.terminate()
+    raise RuntimeError(f"Server did not become healthy within 30 s on port {port}.")
+
+
 def main() -> None:
     base_url = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
     print_planner = os.environ.get("PRINT_PLANNER", "0") == "1"
@@ -1034,12 +1072,18 @@ def main() -> None:
 
     tasks = _load_task_ids()
 
+    _autostarted_proc: subprocess.Popen[bytes] | None = None
     if not _health_ok(base_url):
-        raise RuntimeError(
-            f"Server health check failed at {base_url.rstrip('/')}/health. "
-            "Start the server (e.g., `python -m uvicorn app:app --host 127.0.0.1 --port 8000`) "
-            "or set ENV_BASE_URL to a running deployment."
-        )
+        if _is_localhost_url(base_url):
+            print(f"No server at {base_url} — auto-starting local server ...")
+            repo_root = Path(__file__).resolve().parent
+            _autostarted_proc, base_url = _autostart_server(repo_root)
+            print(f"Server ready at {base_url}")
+        else:
+            raise RuntimeError(
+                f"Server health check failed at {base_url.rstrip('/')}/health. "
+                "Set ENV_BASE_URL to a running deployment."
+            )
 
     results = []
     for task_id in tasks:
@@ -1144,10 +1188,15 @@ def main() -> None:
         )
 
     if not results:
+        if _autostarted_proc is not None:
+            _autostarted_proc.terminate()
         raise RuntimeError("No tasks were successfully evaluated.")
 
     avg = sum(s for _, s, _, _ in results) / len(results)
     print(f"avg_score={avg:.4f}")
+
+    if _autostarted_proc is not None:
+        _autostarted_proc.terminate()
 
 
 if __name__ == "__main__":

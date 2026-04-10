@@ -22,6 +22,12 @@ from inventory_transfer_env import (
     Transfer,
 )
 
+# Environment variables — defaults set for API_BASE_URL and MODEL_NAME only.
+# HF_TOKEN intentionally has no default (must be supplied at runtime).
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Meta-Llama-3.1-70B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
 
 def _greedy_plan(obs) -> InventoryTransferAction:
     products = obs.products
@@ -633,7 +639,12 @@ def _step_once(base_url: str, task_id: str, action: InventoryTransferAction):
     raise last  # type: ignore[misc]
 
 
-def _run_multi_step_episode(base_url: str, task_id: str, mip_time_limit_ms: int):
+def _run_multi_step_episode(
+    base_url: str,
+    task_id: str,
+    mip_time_limit_ms: int,
+    log_step_fn: Any = None,
+):
     """Run a multi-step episode using a single WebSocket connection.
 
     Each step re-solves the MIP on the current observation (receding-horizon),
@@ -654,6 +665,8 @@ def _run_multi_step_episode(base_url: str, task_id: str, mip_time_limit_ms: int)
                     if not raw_ok or not step_action.transfers:
                         step_action = _greedy_plan(current_obs)
                     step_result = env.step(step_action)
+                    if log_step_fn is not None:
+                        log_step_fn(_s + 1, step_result)
                     if not step_result.done:
                         current_obs = step_result.observation
                 if step_result is None:
@@ -1052,9 +1065,9 @@ def main() -> None:
     use_llm = os.environ.get("USE_LLM", "1") == "1"
     force_llm = os.environ.get("FORCE_LLM", "0") == "1"
     print_llm_errors = os.environ.get("PRINT_LLM_ERRORS", "0") == "1"
-    api_base_url = os.environ.get("API_BASE_URL")
-    model_name = os.environ.get("MODEL_NAME")
-    hf_token = os.environ.get("HF_TOKEN")
+    api_base_url = API_BASE_URL
+    model_name = MODEL_NAME
+    hf_token = HF_TOKEN
 
     client = None
     if use_llm and api_base_url and model_name and hf_token:
@@ -1170,19 +1183,29 @@ def main() -> None:
             print(f"planner[{task_id}]={planner}")
 
         max_steps = getattr(obs, "max_steps", 1)
+        print(f"START task_id={task_id}")
         if max_steps > 1:
             # Multi-step episode: keep WS connection open, re-solve MIP each step
-            step = _run_multi_step_episode(base_url, task_id, mip_time_limit_ms)
+            def _log_step(n: int, sr: Any) -> None:
+                print(f"STEP step={n} reward={sr.reward} done={sr.done}")
+
+            step = _run_multi_step_episode(base_url, task_id, mip_time_limit_ms, log_step_fn=_log_step)
         else:
             step = _step_once(base_url, task_id, action)
+            print(f"STEP step=1 reward={step.reward} done={step.done}")
         score = _score_from_obs(step.observation)
-        results.append((task_id, score, step.observation.total_cost, step.observation))
+        obs_final = step.observation
+        dq = "DQ" if obs_final.disqualified else "OK"
+        print(
+            f"END task_id={task_id} score={score:.4f} total_cost={obs_final.total_cost:.2f} "
+            f"fill_rate={obs_final.fill_rate:.4f} status={dq}"
+        )
+        results.append((task_id, score, obs_final.total_cost, obs_final))
 
     for task_id, score, cost, obs in results:
-        dq = "DQ" if obs.disqualified else "OK"
         dq_reasons = "; ".join(obs.dq_reasons) if obs.dq_reasons else ""
         print(
-            f"{task_id}: score={score:.4f} cost={cost:.2f} {dq} "
+            f"{task_id}: score={score:.4f} cost={cost:.2f} "
             f"opt_cost={obs.optimal_cost} ratio={obs.optimality_ratio} gap={obs.cost_gap} "
             f"fill_rate={obs.fill_rate:.4f} dq_reasons={dq_reasons}"
         )

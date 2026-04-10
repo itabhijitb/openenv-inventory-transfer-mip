@@ -22,11 +22,35 @@ from inventory_transfer_env import (
     Transfer,
 )
 
-# Environment variables — defaults set for API_BASE_URL and MODEL_NAME only.
+# Environment variables — defaults for API_BASE_URL and MODEL_NAME only;
 # HF_TOKEN intentionally has no default (must be supplied at runtime).
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Meta-Llama-3.1-70B-Instruct")
-HF_TOKEN = os.getenv("HF_TOKEN")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "meta-llama/Meta-Llama-3.1-70B-Instruct"
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+
+_ENV_BENCHMARK = "inventory_transfer_env"
+
+
+def _log_start(task: str, model: str) -> None:
+    print(f"[START] task={task} env={_ENV_BENCHMARK} model={model}", flush=True)
+
+
+def _log_step(n: int, action_repr: str, reward: float, done: bool, error: str | None) -> None:
+    err = error if error else "null"
+    print(
+        f"[STEP] step={n} action={action_repr} reward={reward:.2f}"
+        f" done={str(done).lower()} error={err}",
+        flush=True,
+    )
+
+
+def _log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rew_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps}"
+        f" score={score:.3f} rewards={rew_str}",
+        flush=True,
+    )
 
 
 def _greedy_plan(obs) -> InventoryTransferAction:
@@ -666,7 +690,7 @@ def _run_multi_step_episode(
                         step_action = _greedy_plan(current_obs)
                     step_result = env.step(step_action)
                     if log_step_fn is not None:
-                        log_step_fn(_s + 1, step_result)
+                        log_step_fn(_s + 1, step_result, step_action)
                     if not step_result.done:
                         current_obs = step_result.observation
                 if step_result is None:
@@ -1183,32 +1207,35 @@ def main() -> None:
             print(f"planner[{task_id}]={planner}")
 
         max_steps = getattr(obs, "max_steps", 1)
-        print(f"START task_id={task_id}")
-        if max_steps > 1:
-            # Multi-step episode: keep WS connection open, re-solve MIP each step
-            def _log_step(n: int, sr: Any) -> None:
-                print(f"STEP step={n} reward={sr.reward} done={sr.done}")
+        per_step_rewards: list[float] = []
+        steps_taken = 0
+        ep_score = 0.0
+        ep_success = False
 
-            step = _run_multi_step_episode(base_url, task_id, mip_time_limit_ms, log_step_fn=_log_step)
-        else:
-            step = _step_once(base_url, task_id, action)
-            print(f"STEP step=1 reward={step.reward} done={step.done}")
-        score = _score_from_obs(step.observation)
-        obs_final = step.observation
-        dq = "DQ" if obs_final.disqualified else "OK"
-        print(
-            f"END task_id={task_id} score={score:.4f} total_cost={obs_final.total_cost:.2f} "
-            f"fill_rate={obs_final.fill_rate:.4f} status={dq}"
-        )
-        results.append((task_id, score, obs_final.total_cost, obs_final))
+        _log_start(task_id, model_name)
+        try:
+            if max_steps > 1:
+                _ep_rewards = per_step_rewards  # capture for closure
 
-    for task_id, score, cost, obs in results:
-        dq_reasons = "; ".join(obs.dq_reasons) if obs.dq_reasons else ""
-        print(
-            f"{task_id}: score={score:.4f} cost={cost:.2f} "
-            f"opt_cost={obs.optimal_cost} ratio={obs.optimality_ratio} gap={obs.cost_gap} "
-            f"fill_rate={obs.fill_rate:.4f} dq_reasons={dq_reasons}"
-        )
+                def _ms_log(n: int, sr: Any, act: Any, _buf: list[float] = _ep_rewards) -> None:
+                    r = float(sr.reward or 0.0)
+                    _buf.append(r)
+                    _log_step(n, f"n_transfers={len(act.transfers)}", r, bool(sr.done), None)
+
+                step = _run_multi_step_episode(base_url, task_id, mip_time_limit_ms, log_step_fn=_ms_log)
+                steps_taken = max_steps
+            else:
+                step = _step_once(base_url, task_id, action)
+                r = float(step.reward or 0.0)
+                per_step_rewards.append(r)
+                steps_taken = 1
+                _log_step(1, f"n_transfers={len(action.transfers)}", r, bool(step.done), None)
+
+            ep_score = float(_score_from_obs(step.observation))
+            ep_success = not step.observation.disqualified
+            results.append((task_id, ep_score, step.observation.total_cost, step.observation))
+        finally:
+            _log_end(ep_success, steps_taken, ep_score, per_step_rewards)
 
     if not results:
         if _autostarted_proc is not None:
@@ -1216,7 +1243,7 @@ def main() -> None:
         raise RuntimeError("No tasks were successfully evaluated.")
 
     avg = sum(s for _, s, _, _ in results) / len(results)
-    print(f"avg_score={avg:.4f}")
+    print(f"avg_score={avg:.4f}", flush=True)
 
     if _autostarted_proc is not None:
         _autostarted_proc.terminate()

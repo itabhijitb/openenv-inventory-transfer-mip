@@ -22,11 +22,12 @@ from inventory_transfer_env import (
     Transfer,
 )
 
-# Environment variables — defaults for API_BASE_URL and MODEL_NAME only;
-# HF_TOKEN intentionally has no default (must be supplied at runtime).
+# Environment variables — defaults for API_BASE_URL and MODEL_NAME only.
+# HF_TOKEN and LOCAL_IMAGE_NAME have no defaults (must be supplied at runtime).
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "meta-llama/Meta-Llama-3.1-70B-Instruct"
-HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 _ENV_BENCHMARK = "inventory_transfer_env"
 

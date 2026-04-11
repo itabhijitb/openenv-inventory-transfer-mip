@@ -5,7 +5,7 @@ colorFrom: yellow
 colorTo: purple
 sdk: docker
 pinned: false
-short_description: Multi-warehouse lateral transshipment benchmark with MIP grader
+short_description: Lateral transshipment benchmark with MIP grader
 ---
 
 # Inventory Transfer Optimization — OpenEnv Benchmark

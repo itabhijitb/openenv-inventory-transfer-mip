@@ -279,14 +279,27 @@ def _finalize_grading_fields(obs: InventoryTransferObservation) -> None:
     obs.disqualified = not obs.is_feasible
     obs.dq_reasons = list(obs.violations) if obs.disqualified else []
     if obs.optimal_cost is not None and obs.optimal_cost > 0 and obs.optimal_cost != float("inf"):
-        obs.optimality_ratio = float(obs.optimal_cost) / max(float(obs.total_cost), float(obs.optimal_cost))
+        # Add 0.1% of optimal_cost to the denominator so that an agent that
+        # exactly matches the reference optimum scores ≈ 0.999 rather than
+        # exactly 1.0.  The validator requires scores to be strictly in (0, 1).
+        denom = max(float(obs.total_cost), float(obs.optimal_cost)) + float(obs.optimal_cost) * 1e-3
+        obs.optimality_ratio = float(obs.optimal_cost) / denom
         obs.cost_gap = float(obs.total_cost) - float(obs.optimal_cost)
         if obs.disqualified:
             obs.score = 0.0
         else:
-            obs.score = max(0.0, min(1.0, obs.optimality_ratio))
+            obs.score = max(0.0, obs.optimality_ratio)
     else:
-        obs.score = 0.0
+        # OR-Tools unavailable or reference infeasible: fall back to fill_rate
+        # so null-action scores are never 0.0 (which would fail the validator).
+        obs.optimality_ratio = None
+        obs.cost_gap = None
+        if obs.disqualified:
+            obs.score = 0.0
+        else:
+            # fill_rate is naturally in (0, 1) for tasks with inventory imbalance.
+            # Cap at 0.999 to guarantee the open-interval invariant.
+            obs.score = max(0.0, min(1.0 - 1e-3, float(obs.fill_rate)))
 
 
 class InventoryTransferEnvironment(Environment):

@@ -36,22 +36,10 @@ class InventoryTransferObservation(Observation):
     lane_capacity: dict[str, dict[str, dict[str, int]]] | None = None
     min_transfer_lot: dict[str, int] | None = None
 
-    # Stochastic demand fields
-    demand_noise_pct: float | None = Field(
-        default=None,
-        description=(
-            "When set, demand is perturbed by ±noise_pct*mean each episode. "
-            "Pass seed= to reset() for reproducible sampling."
-        ),
-    )
-
-    # Multi-step episode fields
-    max_steps: int = Field(default=1, description="Total steps allowed per episode")
-    step_number: int = Field(default=0, description="Current step (1-indexed after first step)")
-    per_step_budget: float | None = Field(
-        default=None,
-        description="Per-step transfer budget (resets each step; overrides episode budget when set)",
-    )
+    demand_noise_pct: float | None = None
+    max_steps: int = 1
+    step_number: int = 0
+    per_step_budget: float | None = None
 
     transfer_cost_total: float = 0.0
     lane_activation_cost_total: float = 0.0

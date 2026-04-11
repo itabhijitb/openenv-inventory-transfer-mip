@@ -19,14 +19,6 @@ from ..models import (
 )
 
 
-def _validate_square_cost_matrix(cost: dict[str, dict[str, float]], nodes: list[str]) -> None:
-    for i in nodes:
-        if i not in cost:
-            raise ValueError(f"transfer_cost missing row for warehouse '{i}'")
-        for j in nodes:
-            if j not in cost[i]:
-                raise ValueError(f"transfer_cost missing entry cost['{i}']['{j}']")
-
 
 def _solve_optimal_mip(
     *,
@@ -42,17 +34,7 @@ def _solve_optimal_mip(
     lane_capacity: dict[str, dict[str, dict[str, int]]] | None,
     min_transfer_lot: dict[str, int] | None,
 ) -> tuple[float, bool]:
-    """Solve the lateral transshipment MIP to optimality using OR-Tools SCIP.
-
-    Returns (optimal_cost, feasible). optimal_cost is the true minimum achievable
-    total cost (transfer + lane activation + shortage penalty) subject to all
-    constraints. feasible=False means no feasible solution exists.
-
-    Lot-size constraint is enforced as x = lot * k (integer multiplier) so the
-    MIP optimum is always achievable by a valid agent action.
-    """
     wh_ids = [w.id for w in warehouses]
-    _validate_square_cost_matrix(transfer_cost, wh_ids)
 
     inv: dict[tuple[str, str], int] = {}
     dem: dict[tuple[str, str], int] = {}
@@ -65,7 +47,7 @@ def _solve_optimal_mip(
     if solver is None:
         raise RuntimeError("OR-Tools SCIP solver is not available")
 
-    def _v(expr: pywraplp.LinearExpr | pywraplp.Variable) -> Any:
+    def _v(expr):
         return cast(Any, expr)
 
     x: dict[tuple[str, str, str], pywraplp.Variable] = {}
@@ -83,14 +65,12 @@ def _solve_optimal_mip(
         for p in products:
             shortage[(j, p)] = solver.NumVar(0.0, solver.infinity(), f"short_{j}_{p}")
 
-    # Inventory availability: outbound per warehouse per product
     for i in wh_ids:
         for p in products:
             solver.Add(
                 _v(solver.Sum([x[(i, j, p)] for j in wh_ids if j != i])) <= inv[(i, p)]
             )
 
-    # Optional aggregate outbound/inbound capacities
     if outbound_capacity:
         for i, cap in outbound_capacity.items():
             if i not in wh_ids:
@@ -308,18 +288,6 @@ class InventoryTransferEnvironment(Environment):
         self._problem: InventoryTransferObservation | None = None
 
     def reset(self, task_id: str = "easy", **kwargs) -> InventoryTransferObservation:
-        """Load task `task_id` and return the initial observation.
-
-        Initialises per-episode state: live inventory (mutated by step()),
-        cumulative cost accumulators, and steps_remaining counter.
-        Multi-step tasks (max_steps > 1) set done=False until the final step.
-
-        Optional kwargs:
-          seed (int): When the task has demand_noise_pct > 0, use this seed to
-              sample demand from Normal(mean, mean*noise_pct) per warehouse/product.
-              Reproducible: same seed produces identical demand. Omit for
-              deterministic behaviour (mean demand used regardless of noise_pct).
-        """
         obs = _build_task_observation(task_id)
 
         seed = kwargs.get("seed", None)
@@ -330,7 +298,6 @@ class InventoryTransferEnvironment(Environment):
             for w in obs.warehouses:
                 new_demand: dict[str, int] = {}
                 for p, mean_d in w.demand.items():
-                    # Sample demand from Normal; clamp to [0, 2*mean] so negatives/huge values don't arise.
                     sample = rng.gauss(float(mean_d), float(mean_d) * noise_pct)
                     new_demand[p] = max(0, min(int(mean_d * 2), int(round(sample))))
                 perturbed.append(Warehouse(id=w.id, inventory=w.inventory, demand=new_demand))
@@ -351,16 +318,6 @@ class InventoryTransferEnvironment(Environment):
         return obs
 
     def step(self, action: Action, **kwargs) -> InventoryTransferObservation:
-        """Apply `action` and return the updated observation.
-
-        Validates every transfer against inventory, lot sizes, lane/outbound/
-        inbound/SKU capacity, and budget (per-step or cumulative). Any violation
-        sets disqualified=True and score=0.0.
-
-        On non-final steps: returns reward=-transfer_cost_this_step, done=False.
-        On the final step: computes shortage penalty, calls the MIP grader for
-        optimal_cost, and returns score = optimal_cost / max(agent_cost, optimal_cost).
-        """
         if self._problem is None:
             raise RuntimeError("Environment must be reset() before step().")
 
@@ -414,16 +371,12 @@ class InventoryTransferEnvironment(Environment):
             if obs.min_transfer_lot:
                 lot = int(obs.min_transfer_lot.get(t.product, 0) or 0)
                 if lot > 0 and t.quantity > 0 and (t.quantity % lot) != 0:
-                    violations.append(
-                        f"min transfer lot violation for {t.product}: qty {t.quantity} not multiple of {lot}"
-                    )
+                    violations.append(f"lot size violation: {t.product} qty={t.quantity} lot={lot}")
                     is_feasible = False
                     continue
 
             if inv[(t.from_warehouse, t.product)] < t.quantity:
-                violations.append(
-                    f"insufficient inventory for {t.from_warehouse}/{t.product}: have {inv[(t.from_warehouse, t.product)]}, tried {t.quantity}"
-                )
+                violations.append(f"insufficient stock: {t.from_warehouse}/{t.product}")
                 is_feasible = False
                 continue
 
@@ -442,9 +395,7 @@ class InventoryTransferEnvironment(Environment):
             for (i, j, p), used in lane_used.items():
                 cap = obs.lane_capacity.get(i, {}).get(j, {}).get(p)
                 if cap is not None and used > int(cap):
-                    violations.append(
-                        f"lane capacity exceeded for {i}->{j}/{p}: {used} > {int(cap)}"
-                    )
+                    violations.append(f"lane cap exceeded: {i}->{j}/{p}")
                     is_feasible = False
 
         if obs.sku_capacity:
@@ -455,12 +406,10 @@ class InventoryTransferEnvironment(Environment):
                     if cap is None:
                         continue
                     if inv[(w, p)] > int(cap):
-                        violations.append(
-                            f"SKU capacity exceeded for {w}/{p}: {inv[(w, p)]} > {int(cap)}"
-                        )
+                        violations.append(f"SKU cap exceeded: {w}/{p}")
                         is_feasible = False
 
-        # Lane fixed activation costs (count each (i,j) once per step if any flow)
+        # lane fixed activation costs
         if obs.lane_fixed_cost:
             activated = {(i, j) for (i, j, _p), used in lane_used.items() if used > 0}
             for (i, j) in activated:

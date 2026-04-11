@@ -22,36 +22,24 @@ from inventory_transfer_env import (
     Transfer,
 )
 
-# Environment variables — defaults for API_BASE_URL and MODEL_NAME only.
-# HF_TOKEN and LOCAL_IMAGE_NAME have no defaults (must be supplied at runtime).
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "meta-llama/Meta-Llama-3.1-70B-Instruct"
 HF_TOKEN = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-_ENV_BENCHMARK = "inventory_transfer_env"
+
+def _log_start(task, model):
+    print(f"[START] task={task} env=inventory_transfer_env model={model}", flush=True)
 
 
-def _log_start(task: str, model: str) -> None:
-    print(f"[START] task={task} env={_ENV_BENCHMARK} model={model}", flush=True)
+def _log_step(n, action_repr, reward, done, error):
+    err = error or "null"
+    print(f"[STEP] step={n} action={action_repr} reward={reward:.2f} done={str(done).lower()} error={err}", flush=True)
 
 
-def _log_step(n: int, action_repr: str, reward: float, done: bool, error: str | None) -> None:
-    err = error if error else "null"
-    print(
-        f"[STEP] step={n} action={action_repr} reward={reward:.2f}"
-        f" done={str(done).lower()} error={err}",
-        flush=True,
-    )
-
-
-def _log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+def _log_end(success, steps, score, rewards):
     rew_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(
-        f"[END] success={str(success).lower()} steps={steps}"
-        f" score={score:.3f} rewards={rew_str}",
-        flush=True,
-    )
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rew_str}", flush=True)
 
 
 def _greedy_plan(obs) -> InventoryTransferAction:
@@ -619,70 +607,41 @@ def _polish_action(obs, base_action: InventoryTransferAction, max_iters: int = 5
     return InventoryTransferAction(transfers=transfers)
 
 
-def _reset_once(base_url: str, task_id: str):
-    last: Exception | None = None
+def _is_retryable(e):
+    msg = str(e)
+    return "CAPACITY_REACHED" in msg or "Server at capacity" in msg or "received 1000" in msg or "ConnectionClosed" in msg
+
+
+def _reset_once(base_url, task_id):
     for attempt in range(6):
         try:
             with InventoryTransferEnv(base_url=base_url).sync() as env:
-                r = env.reset(task_id=task_id)
-                return r.observation
+                return env.reset(task_id=task_id).observation
         except Exception as e:
-            last = e
-            msg = str(e)
-            retryable = (
-                "CAPACITY_REACHED" in msg
-                or "Server at capacity" in msg
-                or "received 1000" in msg
-                or "ConnectionClosed" in msg
-            )
-            if not retryable or attempt >= 5:
+            if not _is_retryable(e) or attempt >= 5:
                 raise
             time.sleep(0.5 * (2**attempt))
-    raise last  # type: ignore[misc]
 
 
-def _step_once(base_url: str, task_id: str, action: InventoryTransferAction):
-    # Use a fresh connection for the step to avoid WS idle timeouts while the LLM is thinking.
-    last: Exception | None = None
+def _step_once(base_url, task_id, action):
+    # fresh connection avoids WS idle timeouts while planning
     for attempt in range(6):
         try:
             with InventoryTransferEnv(base_url=base_url).sync() as env:
-                _ = env.reset(task_id=task_id)
+                env.reset(task_id=task_id)
                 return env.step(action)
         except Exception as e:
-            last = e
-            msg = str(e)
-            retryable = (
-                "CAPACITY_REACHED" in msg
-                or "Server at capacity" in msg
-                or "received 1000" in msg
-                or "ConnectionClosed" in msg
-            )
-            if not retryable or attempt >= 5:
+            if not _is_retryable(e) or attempt >= 5:
                 raise
             time.sleep(0.5 * (2**attempt))
-    raise last  # type: ignore[misc]
 
 
-def _run_multi_step_episode(
-    base_url: str,
-    task_id: str,
-    mip_time_limit_ms: int,
-    log_step_fn: Any = None,
-):
-    """Run a multi-step episode using a single WebSocket connection.
-
-    Each step re-solves the MIP on the current observation (receding-horizon),
-    which sees the updated inventory state returned by the previous step.
-    """
-    last: Exception | None = None
+def _run_multi_step_episode(base_url, task_id, mip_time_limit_ms, log_step_fn=None):
     for attempt in range(6):
         try:
             with InventoryTransferEnv(base_url=base_url).sync() as env:
-                reset_result = env.reset(task_id=task_id)
-                current_obs = reset_result.observation
+                current_obs = env.reset(task_id=task_id).observation
                 max_steps = getattr(current_obs, "max_steps", 1)
-
                 step_result = None
                 for _s in range(max_steps):
                     step_action = _mip_plan(current_obs, time_limit_ms=mip_time_limit_ms)
@@ -695,21 +654,12 @@ def _run_multi_step_episode(
                     if not step_result.done:
                         current_obs = step_result.observation
                 if step_result is None:
-                    raise RuntimeError("Episode produced no step results")
+                    raise RuntimeError("no steps produced")
                 return step_result
         except Exception as e:
-            last = e
-            msg = str(e)
-            retryable = (
-                "CAPACITY_REACHED" in msg
-                or "Server at capacity" in msg
-                or "received 1000" in msg
-                or "ConnectionClosed" in msg
-            )
-            if not retryable or attempt >= 5:
+            if not _is_retryable(e) or attempt >= 5:
                 raise
             time.sleep(0.5 * (2**attempt))
-    raise last  # type: ignore[misc]
 
 
 def _simulate_total_cost(obs, action: InventoryTransferAction) -> tuple[float, float, bool]:
@@ -880,7 +830,8 @@ def _mip_plan(obs: InventoryTransferObservation, time_limit_ms: int = 800) -> In
         return InventoryTransferAction(transfers=[])
     solver.SetTimeLimit(int(time_limit_ms))
 
-    def _v(expr: pywraplp.LinearExpr | pywraplp.Variable) -> Any:
+    # cast helper — OR-Tools expressions don't satisfy pyright's type checker
+    def _v(expr):
         return cast(Any, expr)
 
     x: dict[tuple[str, str, str], pywraplp.Variable] = {}
@@ -1218,9 +1169,9 @@ def main() -> None:
             if max_steps > 1:
                 _ep_rewards = per_step_rewards  # capture for closure
 
-                def _ms_log(n: int, sr: Any, act: Any, _buf: list[float] = _ep_rewards) -> None:
+                def _ms_log(n, sr, act):
                     r = float(sr.reward or 0.0)
-                    _buf.append(r)
+                    per_step_rewards.append(r)
                     _log_step(n, f"n_transfers={len(act.transfers)}", r, bool(sr.done), None)
 
                 step = _run_multi_step_episode(base_url, task_id, mip_time_limit_ms, log_step_fn=_ms_log)
